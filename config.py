@@ -28,3 +28,15 @@ def get_operational_db_config():
         "password": os.getenv("OPERATIONAL_DB_PASSWORD"),
         "sslmode": os.getenv("OPERATIONAL_DB_SSLMODE", "require"),
     }
+
+
+def get_analytics_db_config():
+    """Return the independent analytics database connection settings."""
+    return {
+        "host": os.getenv("ANALYTICS_DB_HOST", "localhost"),
+        "port": os.getenv("ANALYTICS_DB_PORT", "5432"),
+        "dbname": os.getenv("ANALYTICS_DB_NAME"),
+        "user": os.getenv("ANALYTICS_DB_USER"),
+        "password": os.getenv("ANALYTICS_DB_PASSWORD"),
+        "sslmode": os.getenv("ANALYTICS_DB_SSLMODE", "require"),
+    }
