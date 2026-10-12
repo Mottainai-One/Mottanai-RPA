@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
@@ -52,7 +52,7 @@ def transform_record(record: dict[str, Any]) -> dict[str, Any]:
     """Clean one source record; extend this function with business mapping."""
     cleaned = {key: normalize_value(value) for key, value in record.items()}
     cleaned["_source_fingerprint"] = record_fingerprint(cleaned)
-    cleaned["_loaded_at"] = datetime.utcnow()
+    cleaned["_loaded_at"] = datetime.now(timezone.utc)
     return cleaned
 
 
@@ -104,7 +104,7 @@ def run_pipeline(settings) -> dict[str, int]:
     if not all(required):
         raise ValueError("SOURCE_TABLE e DESTINATION_TABLE são obrigatórios")
     stats = {"read": 0, "loaded": 0, "quarantined": 0}
-    started = datetime.utcnow()
+    started = datetime.now(timezone.utc)
     with connection("operational") as target:
         with target.cursor() as cur:
             ensure_control_tables(cur, settings.destination_schema)
