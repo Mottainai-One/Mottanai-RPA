@@ -2,7 +2,9 @@
 
 ## Objetivo
 
-O RPA legado → operacional pode rodar independentemente. Este segundo fluxo lê o estado do banco operacional e atualiza o banco analítico uma vez por dia, às **02:00 no fuso America/Sao_Paulo**. O agendamento fica em `dags/operational_to_analytics.py`. Também é possível executar manualmente com `python run_analytics.py`.
+O RPA legado → operacional pode rodar independentemente. Este segundo fluxo publica no analítico uma fotografia consistente do operacional uma vez por dia, com execução planejada para **02:00 no fuso America/Sao_Paulo**. Ela inclui as mudanças confirmadas até o início efetivo da leitura, inclusive as realizadas entre 00:00 e 02:00. O agendamento está definido em `dags/operational_to_analytics.py`, mas precisa ser ativado no executor escolhido. Também é possível executar manualmente com `python run_analytics.py`.
+
+Entre duas publicações concluídas, as consultas do dashboard usam a última fotografia publicada. Se a execução falhar, a transação do analítico é revertida e a versão anterior continua disponível. O horário real do corte fica em `mottainai_analytics.vw_published_batch.source_cutoff_at`; se o job começar atrasado, o corte também será posterior às 02:00.
 
 ## Preparação
 
@@ -31,6 +33,7 @@ O banco analítico possui outras tabelas de IA, fidelidade e sustentabilidade. E
 - O snapshot de estoque da data da execução é substituído dentro da mesma transação. Se a carga falhar, a transação do analítico é revertida.
 - A leitura usa uma transação `REPEATABLE READ`, mantendo uma visão consistente do operacional durante o lote. O processo grava a contagem por tabela no log e uma linha de sucesso em `mottainai_analytics.job_log`.
 - A carga atualiza `mv_dashboard_metrics` na mesma transação, depois de gravar os fatos. Para manter as métricas diárias coerentes, o dashboard deve consultar o analítico após a execução das 02:00.
+- Cálculos de janelas móveis e de validade usam a data de `vw_published_batch`, em vez do relógio da consulta, para não mudar antes da próxima publicação.
 - A leitura do operacional termina antes de abrir a conexão de escrita no analítico, respeitando o limite de conexões do Aiven Free. Para o volume atual, as linhas são mantidas em memória entre essas etapas.
 - Timestamps operacionais sem fuso são interpretados no destino como horários de São Paulo. Confirme que esse é o fuso usado pelo aplicativo antes da primeira carga real.
 - O pipeline não copia CPF, CNPJ, nome de cliente, e-mail, telefone nem hashes de senha.
@@ -56,6 +59,7 @@ SELECT count(*) FROM mottainai_analytics.mv_dashboard_metrics;
 SELECT count(*) FROM mottainai_analytics.vw_monthly_summary;
 SELECT count(*) FROM mottainai_analytics.vw_critical_stock;
 SELECT count(*) FROM mottainai_analytics.vw_product_risk_ranking;
+SELECT * FROM mottainai_analytics.vw_published_batch;
 ```
 
 Compare essas contagens às tabelas operacionais. Se vendas e estoque ainda não foram usados pela aplicação, as respectivas tabelas fato podem estar vazias; isso não indica erro da carga.
@@ -63,3 +67,5 @@ Compare essas contagens às tabelas operacionais. Se vendas e estoque ainda não
 ## Limites atuais para os KPIs
 
 O esquema operacional não fornece desconto por item nem quantidade reservada no mapeamento atual. A carga preenche esses campos com zero. Assim, métricas de descontos e disponibilidade reservada não devem ser apresentadas como valores reais até que suas fontes sejam definidas. `mv_dashboard_metrics.monthly_economy` fica `NULL`, pois a fonte dessa métrica ainda não está na carga. As views de vendas, estoque e risco só terão linhas quando essas entidades começarem a ser alimentadas no operacional. O dashboard deve consultar o banco físico `MOTTAINAI_ANALITICO`; a criação do job no Databricks ainda é uma entrega separada.
+
+Esta carga cobre as entidades listadas na tabela acima. Ela ainda não é uma réplica integral das tabelas operacionais. Dimensões são atualizadas por chave e fatos transacionais são reconciliados; para reproduzir exclusões físicas de dimensões e todas as demais entidades é necessário ampliar o contrato de sincronização.

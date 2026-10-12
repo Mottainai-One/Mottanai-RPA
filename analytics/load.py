@@ -87,7 +87,7 @@ def _upsert_query(dataset: Dataset, schema: str) -> sql.Composed:
 
 def run(*, now: datetime | None = None) -> dict[str, int]:
     """Reconcile source rows in one destination transaction, then record success."""
-    run_at = (now or datetime.now(ZONE)).astimezone(ZONE)
+    run_at = now.astimezone(ZONE) if now else None
     source_schema = os.getenv("ANALYTICS_SOURCE_SCHEMA", "mottainai")
     target_schema = os.getenv("ANALYTICS_TARGET_SCHEMA", "mottainai_analytics")
     identifier(source_schema)
@@ -107,6 +107,9 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
         source.set_session(readonly=True)
         with source.cursor() as source_cursor:
             source_cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            source_cursor.execute("SELECT transaction_timestamp()")
+            source_cutoff = source_cursor.fetchone()[0].astimezone(ZONE)
+            run_at = run_at or source_cutoff
             for dataset in DATASETS:
                 query = dataset.source_query.format(src=sql.Identifier(source_schema).as_string(source))
                 source_cursor.execute(query, (run_at.date(),) if dataset.snapshot else ())
