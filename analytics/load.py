@@ -58,8 +58,10 @@ DATASETS = (
             "SELECT p.sale_payment_id, p.sale_id, p.sale_date::date, s.store_id, p.payment_method::text, p.amount, p.installments FROM {src}.sale_payment p JOIN {src}.sales_transaction s ON s.sale_id=p.sale_id AND s.sale_date=p.sale_date"),
     Dataset("fact_inventory_movement", ("movement_id", "movement_date", "movement_timestamp", "company_id", "store_id", "inventory_id", "product_id", "batch_id", "employee_id", "movement_type", "quantity", "unit_cost"), ("movement_id", "movement_date"),
             "SELECT m.movement_id, m.movement_date::date, m.movement_date, st.company_id, i.store_id, i.inventory_id, b.product_id, i.batch_id, m.employee_id, m.movement_type::text, m.moved_quantity, b.unit_cost FROM {src}.inventory_movement m JOIN {src}.inventory i ON i.inventory_id=m.inventory_id JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id"),
-    Dataset("fact_inventory_snapshot", ("snapshot_date", "company_id", "store_id", "product_id", "batch_id", "inventory_type", "quantity", "reserved_quantity", "average_cost", "expiration_date"), ("snapshot_date", "store_id", "product_id", "batch_id", "inventory_type"),
-            "SELECT %s::date, st.company_id, i.store_id, b.product_id, i.batch_id, i.inventory_type::text, i.current_quantity, 0::numeric, b.unit_cost, b.expiration_date FROM {src}.inventory i JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id WHERE i.deleted_at IS NULL", True),
+    Dataset("fact_inventory_snapshot", ("snapshot_date", "company_id", "store_id", "product_id", "batch_id", "inventory_type", "quantity", "reserved_quantity", "average_cost", "expiration_date", "inventory_id", "minimum_quantity"), ("snapshot_date", "store_id", "product_id", "batch_id", "inventory_type"),
+            "SELECT %s::date, st.company_id, i.store_id, b.product_id, i.batch_id, i.inventory_type::text, i.current_quantity, 0::numeric, b.unit_cost, b.expiration_date, i.inventory_id, i.minimum_quantity FROM {src}.inventory i JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id WHERE i.deleted_at IS NULL", True),
+    Dataset("fact_alert_snapshot", ("snapshot_date", "alert_id", "store_id", "status"), ("snapshot_date", "alert_id"),
+            "SELECT %s::date, a.alert_id, a.store_id, a.status::text FROM {src}.alert a", True),
     Dataset("fact_store_daily", ("snapshot_date", "company_id", "store_id", "employees_total", "employees_active", "users_total", "users_active"), ("snapshot_date", "store_id"),
             "SELECT %s::date, s.company_id, s.store_id, count(DISTINCT e.employee_id)::integer, count(DISTINCT e.employee_id) FILTER (WHERE e.active AND e.deleted_at IS NULL)::integer, count(DISTINCT u.user_id)::integer, count(DISTINCT u.user_id) FILTER (WHERE u.active AND u.deleted_at IS NULL)::integer FROM {src}.retail_store s LEFT JOIN {src}.employee e ON e.store_id=s.store_id LEFT JOIN {src}.app_user u ON u.employee_id=e.employee_id WHERE s.deleted_at IS NULL GROUP BY s.company_id,s.store_id", True),
 )
@@ -135,6 +137,9 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                 target_cursor.execute(
                     sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
                     ("operational_to_analytics_daily", "SUCCEEDED", run_at, sum(counts.values()), sum(counts.values()), "{}"),
+                )
+                target_cursor.execute(
+                    sql.SQL("REFRESH MATERIALIZED VIEW {}.mv_dashboard_metrics").format(identifier(target_schema))
                 )
             target.commit()
         except Exception:

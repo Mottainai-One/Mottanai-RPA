@@ -19,6 +19,7 @@ O RPA legado → operacional pode rodar independentemente. Este segundo fluxo l�
 | `sales_transaction`, `sale_item`, `sale_payment` | `fact_sales`, `fact_sale_item`, `fact_sale_payment` | Venda e itens cancelados preservam o status da venda; apenas itens vendidos entram em `fact_sale_item` |
 | `inventory_movement`, `inventory`, `batch` | `fact_inventory_movement`, `fact_inventory_snapshot` | Snapshot recebe a data da execução em São Paulo |
 | `retail_store`, `employee`, `app_user` | `fact_store_daily` | Resumo diário para as views de empresas e lojas |
+| `inventory.minimum_quantity`, `inventory.inventory_id`, `alert` | `fact_inventory_snapshot`, `fact_alert_snapshot` | Base diária para estoque crítico e alertas do dashboard |
 
 O banco analítico possui outras tabelas de IA, fidelidade e sustentabilidade. Elas **não são carregadas por este fluxo** e só terão dados quando suas fontes operacionais forem mapeadas.
 
@@ -29,6 +30,7 @@ O banco analítico possui outras tabelas de IA, fidelidade e sustentabilidade. E
 - A primeira execução carrega todos os registros das entidades acima. Cada execução seguinte reconcilia o histórico inteiro: dimensões usam `ON CONFLICT DO UPDATE` e fatos transacionais são substituídos dentro da transação. Isso captura correções e cancelamentos tardios mesmo porque `updated_at` não é atualizado automaticamente em todas as tabelas operacionais. É uma solução para a massa atual; antes de aumentar muito o volume, adicionar captura de alterações ou watermarks confiáveis.
 - O snapshot de estoque da data da execução é substituído dentro da mesma transação. Se a carga falhar, a transação do analítico é revertida.
 - A leitura usa uma transação `REPEATABLE READ`, mantendo uma visão consistente do operacional durante o lote. O processo grava a contagem por tabela no log e uma linha de sucesso em `mottainai_analytics.job_log`.
+- A carga atualiza `mv_dashboard_metrics` na mesma transação, depois de gravar os fatos. Para manter as métricas diárias coerentes, o dashboard deve consultar o analítico após a execução das 02:00.
 - A leitura do operacional termina antes de abrir a conexão de escrita no analítico, respeitando o limite de conexões do Aiven Free. Para o volume atual, as linhas são mantidas em memória entre essas etapas.
 - Timestamps operacionais sem fuso são interpretados no destino como horários de São Paulo. Confirme que esse é o fuso usado pelo aplicativo antes da primeira carga real.
 - O pipeline não copia CPF, CNPJ, nome de cliente, e-mail, telefone nem hashes de senha.
@@ -50,10 +52,14 @@ SELECT count(*) FROM mottainai_analytics.fact_store_daily;
 SELECT count(*) FROM mottainai_analytics.vw_company_kpis;
 SELECT count(*) FROM mottainai_analytics.vw_employee_distribution;
 SELECT count(*) FROM mottainai_analytics.vw_store_daily_kpis;
+SELECT count(*) FROM mottainai_analytics.mv_dashboard_metrics;
+SELECT count(*) FROM mottainai_analytics.vw_monthly_summary;
+SELECT count(*) FROM mottainai_analytics.vw_critical_stock;
+SELECT count(*) FROM mottainai_analytics.vw_product_risk_ranking;
 ```
 
 Compare essas contagens às tabelas operacionais. Se vendas e estoque ainda não foram usados pela aplicação, as respectivas tabelas fato podem estar vazias; isso não indica erro da carga.
 
 ## Limites atuais para os KPIs
 
-O esquema operacional não fornece desconto por item nem quantidade reservada no mapeamento atual. A carga preenche esses campos com zero. Assim, métricas de descontos e disponibilidade reservada não devem ser apresentadas como valores reais até que suas fontes sejam definidas. O dashboard deve passar a consultar as três `vw_*` do banco físico `MOTTAINAI_ANALITICO`; a criação do job no Databricks ainda é uma entrega separada.
+O esquema operacional não fornece desconto por item nem quantidade reservada no mapeamento atual. A carga preenche esses campos com zero. Assim, métricas de descontos e disponibilidade reservada não devem ser apresentadas como valores reais até que suas fontes sejam definidas. `mv_dashboard_metrics.monthly_economy` fica `NULL`, pois a fonte dessa métrica ainda não está na carga. As views de vendas, estoque e risco só terão linhas quando essas entidades começarem a ser alimentadas no operacional. O dashboard deve consultar o banco físico `MOTTAINAI_ANALITICO`; a criação do job no Databricks ainda é uma entrega separada.
