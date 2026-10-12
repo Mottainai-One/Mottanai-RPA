@@ -38,8 +38,8 @@ class Dataset:
 # Queries only select fields needed by the Data Mart. In particular, no CPF,
 # CNPJ, address, email, phone, password, or customer name crosses databases.
 DATASETS = (
-    Dataset("dim_company", ("company_id", "plan_id", "legal_name", "trade_name", "active", "source_updated_at"), ("company_id",),
-            "SELECT company_id, plan_id, official_name, trade_name, active AND deleted_at IS NULL, updated_at FROM {src}.company"),
+    Dataset("dim_company", ("company_id", "plan_id", "legal_name", "trade_name", "active", "source_updated_at", "plan_name"), ("company_id",),
+            "SELECT c.company_id, c.plan_id, c.official_name, c.trade_name, c.active AND c.deleted_at IS NULL, c.updated_at, p.name FROM {src}.company c JOIN {src}.subscription_plan p ON p.plan_id=c.plan_id"),
     Dataset("dim_store", ("store_id", "company_id", "name", "city", "state_code", "latitude", "longitude", "active", "source_updated_at"), ("store_id",),
             "SELECT s.store_id, s.company_id, s.name, a.city, a.state, s.latitude, s.longitude, s.active AND s.deleted_at IS NULL, s.updated_at FROM {src}.retail_store s JOIN {src}.address a ON a.address_id=s.address_id"),
     Dataset("dim_category", ("category_id", "parent_category_id", "name", "active", "source_updated_at"), ("category_id",),
@@ -49,7 +49,7 @@ DATASETS = (
     Dataset("dim_employee", ("employee_id", "store_id", "role_id", "role_name", "active", "source_updated_at"), ("employee_id",),
             "SELECT e.employee_id, e.store_id, e.role_id, r.name, e.active AND e.deleted_at IS NULL, e.updated_at FROM {src}.employee e JOIN {src}.employee_role r ON r.role_id=e.role_id"),
     Dataset("dim_customer", ("customer_id", "birth_year", "active", "marketing_consent", "source_updated_at"), ("customer_id",),
-            "SELECT customer_id, EXTRACT(YEAR FROM birth_date)::smallint, active AND deleted_at IS NULL, marketing_consent, updated_at FROM {src}.customer"),
+            "SELECT customer_id, birth_year, active AND deleted_at IS NULL, marketing_consent, updated_at FROM {src}.customer"),
     Dataset("fact_sales", ("sale_id", "sale_date", "sale_timestamp", "company_id", "store_id", "employee_id", "customer_id", "item_count", "gross_amount", "discount_amount", "net_amount", "status"), ("sale_id", "sale_date"),
             "SELECT s.sale_id, s.sale_date::date, s.sale_date, st.company_id, s.store_id, s.employee_id, s.customer_id, (SELECT count(*) FROM {src}.sale_item i WHERE i.sale_id=s.sale_id AND i.sale_date=s.sale_date AND i.status::text='SOLD'), s.total_amount, 0::numeric, s.total_amount, s.status::text FROM {src}.sales_transaction s JOIN {src}.retail_store st ON st.store_id=s.store_id"),
     Dataset("fact_sale_item", ("sale_item_id", "sale_id", "sale_date", "store_id", "product_id", "batch_id", "quantity", "unit_price", "discount_amount", "subtotal"), ("sale_item_id", "sale_date"),
@@ -60,6 +60,8 @@ DATASETS = (
             "SELECT m.movement_id, m.movement_date::date, m.movement_date, st.company_id, i.store_id, i.inventory_id, b.product_id, i.batch_id, m.employee_id, m.movement_type::text, m.moved_quantity, b.unit_cost FROM {src}.inventory_movement m JOIN {src}.inventory i ON i.inventory_id=m.inventory_id JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id"),
     Dataset("fact_inventory_snapshot", ("snapshot_date", "company_id", "store_id", "product_id", "batch_id", "inventory_type", "quantity", "reserved_quantity", "average_cost", "expiration_date"), ("snapshot_date", "store_id", "product_id", "batch_id", "inventory_type"),
             "SELECT %s::date, st.company_id, i.store_id, b.product_id, i.batch_id, i.inventory_type::text, i.current_quantity, 0::numeric, b.unit_cost, b.expiration_date FROM {src}.inventory i JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id WHERE i.deleted_at IS NULL", True),
+    Dataset("fact_store_daily", ("snapshot_date", "company_id", "store_id", "employees_total", "employees_active", "users_total", "users_active"), ("snapshot_date", "store_id"),
+            "SELECT %s::date, s.company_id, s.store_id, count(DISTINCT e.employee_id)::integer, count(DISTINCT e.employee_id) FILTER (WHERE e.active AND e.deleted_at IS NULL)::integer, count(DISTINCT u.user_id)::integer, count(DISTINCT u.user_id) FILTER (WHERE u.active AND u.deleted_at IS NULL)::integer FROM {src}.retail_store s LEFT JOIN {src}.employee e ON e.store_id=s.store_id LEFT JOIN {src}.app_user u ON u.employee_id=e.employee_id WHERE s.deleted_at IS NULL GROUP BY s.company_id,s.store_id", True),
 )
 
 
@@ -96,15 +98,22 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
         if missing:
             raise ValueError(f"Missing {name} connection settings: {', '.join(missing)}")
     counts: dict[str, int] = {}
-    with closing(psycopg2.connect(**get_operational_db_config())) as source, closing(psycopg2.connect(**get_analytics_db_config())) as target:
+    # Aiven Free has few connection slots. Read one consistent source snapshot,
+    # release its connection, then apply everything in one target transaction.
+    source_rows: list[tuple[Dataset, list[tuple]]] = []
+    with closing(psycopg2.connect(**get_operational_db_config())) as source:
         source.set_session(readonly=True)
+        with source.cursor() as source_cursor:
+            source_cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            for dataset in DATASETS:
+                query = dataset.source_query.format(src=sql.Identifier(source_schema).as_string(source))
+                source_cursor.execute(query, (run_at.date(),) if dataset.snapshot else ())
+                source_rows.append((dataset, source_cursor.fetchall()))
+    with closing(psycopg2.connect(**get_analytics_db_config())) as target:
         try:
-            with source.cursor() as source_cursor, target.cursor() as target_cursor:
-                source_cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            with target.cursor() as target_cursor:
                 target_cursor.execute("SET LOCAL TIME ZONE 'America/Sao_Paulo'")
-                for dataset in DATASETS:
-                    query = dataset.source_query.format(src=sql.Identifier(source_schema).as_string(source))
-                    source_cursor.execute(query, (run_at.date(),) if dataset.snapshot else ())
+                for dataset, rows in source_rows:
                     if dataset.snapshot:
                         target_cursor.execute(
                             sql.SQL("DELETE FROM {}.{} WHERE snapshot_date=%s").format(identifier(target_schema), sql.Identifier(dataset.target)),
@@ -116,11 +125,11 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                         target_cursor.execute(
                             sql.SQL("DELETE FROM {}.{}").format(identifier(target_schema), sql.Identifier(dataset.target))
                         )
-                    written = 0
+                    written = len(rows)
                     upsert = _upsert_query(dataset, target_schema).as_string(target)
-                    while batch := source_cursor.fetchmany(batch_size):
+                    for start in range(0, written, batch_size):
+                        batch = rows[start:start + batch_size]
                         execute_values(target_cursor, upsert, batch, page_size=batch_size)
-                        written += len(batch)
                     counts[dataset.target] = written
                     LOG.info("loaded %s rows into %s", written, dataset.target)
                 target_cursor.execute(
