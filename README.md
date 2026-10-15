@@ -11,6 +11,8 @@ Este repositório reúne as integrações entre os bancos físicos do Mottainai.
 
 O primeiro fluxo valida o contrato estrutural do legado antes de escrever, preserva os dados mascarados, protege dados pessoais e registra linhas rejeitadas sem salvar seus valores. O segundo constrói dimensões e fatos para BI, sem copiar CPF, e-mail, telefone ou senha. Cada fluxo tem configuração própria no `.env.example` e pode ser executado isoladamente.
 
+O agendamento legado → operacional também está definido em `.github/workflows/legacy-to-operational.yml`. Ele começa a executar a cada 30 minutos somente depois que a PR estiver na branch padrão e os secrets do repositório estiverem configurados. A execução manual começa em modo dry-run por segurança.
+
 ## Organização
 
 - `relational_migration.py` e `run_migration.py`: migração legado → operacional.

@@ -1,0 +1,56 @@
+name: Legacy to operational synchronization
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Validate and roll back instead of committing
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: legacy-to-operational-production
+  cancel-in-progress: false
+
+jobs:
+  synchronize:
+    name: Synchronize PostgreSQL databases
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      LEGACY_DB_HOST: ${{ secrets.LEGACY_DB_HOST }}
+      LEGACY_DB_PORT: ${{ secrets.LEGACY_DB_PORT }}
+      LEGACY_DB_NAME: ${{ secrets.LEGACY_DB_NAME }}
+      LEGACY_DB_USER: ${{ secrets.LEGACY_DB_USER }}
+      LEGACY_DB_PASSWORD: ${{ secrets.LEGACY_DB_PASSWORD }}
+      LEGACY_DB_SSLMODE: require
+      OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
+      OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
+      OPERATIONAL_DB_NAME: ${{ secrets.OPERATIONAL_DB_NAME }}
+      OPERATIONAL_DB_USER: ${{ secrets.OPERATIONAL_DB_USER }}
+      OPERATIONAL_DB_PASSWORD: ${{ secrets.OPERATIONAL_DB_PASSWORD }}
+      OPERATIONAL_DB_SSLMODE: require
+      SOURCE_SCHEMA: public
+      DESTINATION_SCHEMA: mottainai
+      MIGRATION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime dependencies
+        run: pip install --requirement requirements.txt
+
+      - name: Run relational synchronization
+        run: python -u run_migration.py
