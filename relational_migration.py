@@ -28,6 +28,17 @@ STATE_CODES = {
 }
 BCRYPT_RE = re.compile(r"^\$2[aby]\$[0-3][0-9]\$[./A-Za-z0-9]{53}$")
 
+LEGACY_REQUIRED_COLUMNS = {
+    "address": {"addressid", "zipcode", "street", "number", "neighborhood", "city", "state"},
+    "administration": {"administrationid", "email", "passwordhash"},
+    "company": {"companyid", "subscriptionplanid", "officialname", "cnpj", "email", "active"},
+    "employee": {"employeeid", "storeid", "roleid", "name", "cpf", "email", "phone", "active", "hiredate"},
+    "employeerole": {"roleid", "name", "permissionlevel", "active"},
+    "store": {"storeid", "companyid", "addressid", "name", "cnpj", "email", "phone", "active"},
+    "subscriptionplan": {"planid", "name", "description", "price", "storelimit", "userlimit", "active"},
+    "useraccount": {"userid", "employeeid", "email", "passwordhash", "active"},
+}
+
 
 def clean_digits(value: Any) -> str | None:
     if value is None:
@@ -41,6 +52,22 @@ def clean_text(value: Any) -> str | None:
         return None
     value = " ".join(str(value).replace("\x00", "").strip().split())
     return value or None
+
+
+def is_valid_cnpj(value: Any) -> bool:
+    """Validate a Brazilian CNPJ before it reaches destination constraints."""
+    digits = clean_digits(value)
+    if not digits or len(digits) != 14 or digits == digits[0] * 14:
+        return False
+
+    def check_digit(base: str, weights: tuple[int, ...]) -> str:
+        total = sum(int(number) * weight for number, weight in zip(base, weights))
+        remainder = total % 11
+        return "0" if remainder < 2 else str(11 - remainder)
+
+    first = check_digit(digits[:12], (5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2))
+    second = check_digit(digits[:12] + first, (6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2))
+    return digits[-2:] == first + second
 
 
 def protected_token(prefix: str, value: Any, *, digits: bool = False) -> str | None:
@@ -122,6 +149,28 @@ def rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
     return [dict(row) for row in cur.fetchall()]
 
 
+def validate_legacy_contract(cur, schema: str) -> None:
+    """Fail before writing when the legacy schema no longer matches the mapping."""
+    cur.execute(
+        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema=%s",
+        (schema,),
+    )
+    available: dict[str, set[str]] = defaultdict(set)
+    for row in cur.fetchall():
+        available[row["table_name"]].add(row["column_name"])
+
+    errors = []
+    for table, required in LEGACY_REQUIRED_COLUMNS.items():
+        if table not in available:
+            errors.append(f"missing table {schema}.{table}")
+            continue
+        missing = sorted(required - available[table])
+        if missing:
+            errors.append(f"{schema}.{table} missing columns: {', '.join(missing)}")
+    if errors:
+        raise ValueError("Legacy schema contract mismatch: " + "; ".join(errors))
+
+
 def upsert(cur, target: str, values: dict[str, Any], conflict: str, primary_key: str) -> int:
     values = {key: value for key, value in values.items() if value is not None or key not in {"created_at", "updated_at"}}
     columns = list(values)
@@ -168,6 +217,7 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
     target_schema = settings.destination_schema
     counts = defaultdict(int)
     quarantine: list[dict[str, Any]] = []
+    LOGGER.info("starting legacy to operational migration (dry_run=%s)", dry_run)
 
     def quarantine_record(table: str, source_id: Any, reason: str) -> None:
         # Deliberately do not persist source payloads or secrets.
@@ -177,11 +227,16 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
         target_cursor = target.cursor()
         try:
             source_cursor.execute("SET TRANSACTION READ ONLY")
+            validate_legacy_contract(source_cursor, source_schema)
             # Read all source rows before changing the destination. This keeps a
             # consistent source snapshot and makes dry-run fully non-mutating.
             source_data = {name: rows(source_cursor, source_schema, name) for name in (
                 "address", "employeerole", "subscriptionplan", "company", "store", "employee", "useraccount", "administration"
             )}
+            LOGGER.info(
+                "legacy snapshot captured: %s rows",
+                sum(len(table_rows) for table_rows in source_data.values()),
+            )
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
 
             # 1) Independent entities.
@@ -207,40 +262,74 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                 values = {"name": clean_text(item["name"]), "description": clean_text(item["description"]), "price": item["price"], "store_limit": item["storelimit"], "user_limit": item["userlimit"], "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["plan"][item["planid"]] = upsert(target_cursor, q(target_schema, "subscription_plan"), values, "name", "plan_id")
                 counts["subscription_plan"] += 1
+            LOGGER.info("independent entities mapped: %s", dict(counts))
 
             # 2) Company, store, employee and account dependency chain.
             for item in source_data["company"]:
-                plan = next((p for p in source_data["subscriptionplan"] if p["companyid"] == item["companyid"]), None)
-                if not plan:
-                    raise ValueError(f"Empresa {item['companyid']} sem plano legado")
-                values = {"plan_id": maps["plan"].get(plan["planid"], 0), "official_name": clean_text(item["officialname"]), "trade_name": clean_text(item.get("tradename")), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item.get("phone")), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
+                if not is_valid_cnpj(item["cnpj"]):
+                    quarantine_record("company", item["companyid"], "CNPJ inválido")
+                    counts["company_quarantined"] += 1
+                    continue
+                operational_plan_id = maps["plan"].get(item["subscriptionplanid"])
+                if not operational_plan_id:
+                    quarantine_record("company", item["companyid"], "Plano legado não mapeado")
+                    counts["company_quarantined"] += 1
+                    continue
+                values = {"plan_id": operational_plan_id, "official_name": clean_text(item["officialname"]), "trade_name": clean_text(item.get("tradename")), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item.get("phone")), "latitude": item.get("latitude"), "longitude": item.get("longitude"), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["company"][item["companyid"]] = upsert(target_cursor, q(target_schema, "company"), values, "cnpj", "company_id")
                 counts["company"] += 1
 
             for item in source_data["store"]:
-                values = {"company_id": maps["company"].get(item["companyid"], 0), "address_id": maps["address"].get(item["addressid"], 0), "name": clean_text(item["name"]), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
+                company_id = maps["company"].get(item["companyid"])
+                address_id = maps["address"].get(item["addressid"])
+                if not is_valid_cnpj(item["cnpj"]):
+                    quarantine_record("store", item["storeid"], "CNPJ inválido")
+                    counts["retail_store_quarantined"] += 1
+                    continue
+                if not company_id or not address_id:
+                    quarantine_record("store", item["storeid"], "Empresa ou endereço não mapeado")
+                    counts["retail_store_quarantined"] += 1
+                    continue
+                values = {"company_id": company_id, "address_id": address_id, "name": clean_text(item["name"]), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "latitude": item.get("latitude"), "longitude": item.get("longitude"), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["store"][item["storeid"]] = upsert(target_cursor, q(target_schema, "retail_store"), values, "cnpj", "store_id")
                 counts["retail_store"] += 1
+            LOGGER.info("companies and stores mapped: %s", dict(counts))
 
+            seen_employee_cpfs: set[str] = set()
             for item in source_data["employee"]:
                 source_store = next((store for store in source_data["store"] if store["storeid"] == item["storeid"]), None)
                 if not source_store:
-                    raise ValueError(f"Funcionário {item['employeeid']} sem loja legada")
+                    quarantine_record("employee", item["employeeid"], "Loja legada inexistente")
+                    counts["employee_quarantined"] += 1
+                    continue
                 operational_company_id = maps["company"].get(source_store["companyid"])
-                if not operational_company_id:
-                    raise ValueError(f"Loja {item['storeid']} sem empresa operacional mapeada")
+                operational_store_id = maps["store"].get(item["storeid"])
+                operational_role_id = maps["role"].get(item["roleid"])
+                if not operational_company_id or not operational_store_id or not operational_role_id:
+                    quarantine_record("employee", item["employeeid"], "Loja, empresa ou função não mapeada")
+                    counts["employee_quarantined"] += 1
+                    continue
+                protected_cpf = preserve_or_protect_cpf(item["cpf"])
+                if not protected_cpf or protected_cpf in seen_employee_cpfs:
+                    quarantine_record("employee", item["employeeid"], "CPF normalizado ausente ou duplicado")
+                    counts["employee_quarantined"] += 1
+                    continue
+                seen_employee_cpfs.add(protected_cpf)
                 target_cursor.execute(
                     "SELECT mottainai.fn_set_legacy_migration_context(%s)",
                     (operational_company_id,),
                 )
-                values = {"store_id": maps["store"].get(item["storeid"], 0), "role_id": maps["role"].get(item["roleid"], 0), "name": protected_employee_name(item["name"]), "cpf": preserve_or_protect_cpf(item["cpf"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "active": item["active"], "hire_date": item["hiredate"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
+                values = {"store_id": operational_store_id, "role_id": operational_role_id, "name": protected_employee_name(item["name"]), "cpf": protected_cpf, "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "active": item["active"], "hire_date": item["hiredate"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["employee"][item["employeeid"]] = upsert(target_cursor, q(target_schema, "employee"), values, "cpf", "employee_id")
                 counts["employee"] += 1
+            LOGGER.info("employees mapped: %s", counts["employee"])
 
             for item in source_data["useraccount"]:
                 employee = next((employee for employee in source_data["employee"] if employee["employeeid"] == item["employeeid"]), None)
-                if not employee:
-                    raise ValueError(f"Usuário {item['userid']} sem funcionário legado")
+                if not employee or item["employeeid"] not in maps["employee"]:
+                    quarantine_record("useraccount", item["userid"], "Funcionário não mapeado")
+                    counts["useraccount_quarantined"] += 1
+                    continue
                 if not is_bcrypt(item["passwordhash"]):
                     quarantine_record("useraccount", item["userid"], "password_hash não está em formato BCrypt")
                     counts["useraccount_quarantined"] += 1
@@ -248,6 +337,11 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                 values = {"employee_id": maps["employee"].get(item["employeeid"], 0), "cpf": preserve_or_protect_cpf(employee["cpf"]), "email": preserve_or_protect_email(item["email"]), "password_hash": item["passwordhash"], "last_login": item.get("lastlogin"), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["user"][item["userid"]] = upsert_app_user(target_cursor, q(target_schema, "app_user"), values)
                 counts["system_user"] += 1
+            LOGGER.info(
+                "accounts mapped: %s accepted, %s quarantined",
+                counts["system_user"],
+                counts["useraccount_quarantined"],
+            )
 
             # Administration is not linked to employee in the target model.
             counts["administration"] = len(source_data["administration"])
@@ -257,8 +351,10 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                 json.dump(quarantine, output, ensure_ascii=False, indent=2)
             if dry_run:
                 target.rollback()
+                LOGGER.info("dry-run completed; target transaction rolled back")
             else:
                 target.commit()
+                LOGGER.info("migration committed successfully")
             return dict(counts)
         except Exception:
             target.rollback()
