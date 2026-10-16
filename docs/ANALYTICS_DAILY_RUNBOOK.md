@@ -2,6 +2,8 @@
 
 O job `mottainai_operational_to_analytics_daily` lê o banco operacional `MOTTAINAI` e publica um batch no schema `mottainai_analytics` diariamente às 02:00. A data de referência é o dia anterior no fuso `America/Sao_Paulo`. Ele não acessa o legado.
 
+Na PR 34, os campos de identidade de `employee` e `app_user` podem ser removidos após a finalização AES-256-GCM. A RPA analítica nunca copia esses campos, inclusive `cpf_ciphertext`, `cpf_nonce`, `cpf_masked`, `email_ciphertext`, `email_nonce`, `email_masked`, `phone_ciphertext`, `phone_nonce`, `phone_masked`, `key_version` e `encrypted_at`.
+
 Teste local:
 
 ```powershell

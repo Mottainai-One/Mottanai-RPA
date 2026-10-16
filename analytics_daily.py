@@ -1,4 +1,4 @@
-"""Operational -> mottainai_analytics daily batch for PR 31."""
+"""Operational -> mottainai_analytics daily batch for PR 34."""
 from __future__ import annotations
 import hashlib, json, logging, os
 from datetime import date, datetime, timedelta
@@ -12,7 +12,7 @@ SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 OPERATIONAL_SCHEMA = os.getenv("OPERATIONAL_SCHEMA", "mottainai")
 ANALYTICS_SCHEMA = os.getenv("ANALYTICS_SCHEMA", "mottainai_analytics")
 PIPELINE = "operational_to_analytics_daily"
-FORBIDDEN_KEYS = {"cpf","email","phone","full_name","customer_document","password","password_hash","refresh_token","refresh_token_hash","token_hash","recovery_token_hash","code_hash","firebase_uid","address_token","street","number","neighborhood","zip_code","old_data","new_data","stack_trace","parameters","payload","response","name_ciphertext","name_nonce","name_token","name_masked","email_ciphertext","email_nonce","email_token","email_masked","phone_ciphertext","phone_nonce","phone_token","phone_masked","key_version","encrypted_at"}
+FORBIDDEN_KEYS = {"cpf","email","phone","full_name","customer_document","password","password_hash","refresh_token","refresh_token_hash","token_hash","recovery_token_hash","code_hash","firebase_uid","address_token","street","number","neighborhood","zip_code","old_data","new_data","stack_trace","parameters","payload","response","name_ciphertext","name_nonce","name_token","name_masked","cpf_ciphertext","cpf_nonce","cpf_masked","email_ciphertext","email_nonce","email_token","email_masked","phone_ciphertext","phone_nonce","phone_token","phone_masked","key_version","encrypted_at"}
 
 def previous_day(reference: datetime | None = None) -> date:
     now = reference.astimezone(SAO_PAULO) if reference else datetime.now(SAO_PAULO)

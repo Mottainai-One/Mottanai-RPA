@@ -122,6 +122,29 @@ def rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
     return [dict(row) for row in cur.fetchall()]
 
 
+def validate_legacy_migration_contract(cur) -> None:
+    """Fail before writes when PR 34 finalization removed legacy PII columns."""
+    cur.execute("""
+        SELECT table_name, column_name
+        FROM information_schema.columns
+        WHERE table_schema = 'mottainai'
+          AND table_name IN ('employee', 'app_user')
+          AND column_name IN ('name', 'cpf', 'email', 'phone')
+    """)
+    found = {(row[0], row[1]) for row in cur.fetchall()}
+    employee_columns = {"name", "cpf", "email", "phone"}
+    app_user_columns = {"cpf", "email"}
+    employee_found = {column for table, column in found if table == "employee"}
+    app_user_found = {column for table, column in found if table == "app_user"}
+    if not employee_columns.issubset(employee_found) or not app_user_columns.issubset(app_user_found):
+        raise RuntimeError(
+            "PR 34 finalization detected: employee/app_user PII columns were removed. "
+            "The legacy migration requires an approved AES-256-GCM encryption step "
+            "to populate mottainai.employee_private_data before loading. "
+            "Do not run the real migration until that encryption integration is configured."
+        )
+
+
 def upsert(cur, target: str, values: dict[str, Any], conflict: str, primary_key: str) -> int:
     values = {key: value for key, value in values.items() if value is not None or key not in {"created_at", "updated_at"}}
     columns = list(values)
@@ -176,6 +199,7 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
         source_cursor = source.cursor(cursor_factory=RealDictCursor)
         target_cursor = target.cursor()
         try:
+            validate_legacy_migration_contract(target_cursor)
             source_cursor.execute("SET TRANSACTION READ ONLY")
             # Read all source rows before changing the destination. This keeps a
             # consistent source snapshot and makes dry-run fully non-mutating.
