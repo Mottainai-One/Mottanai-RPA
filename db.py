@@ -8,12 +8,17 @@ from psycopg2.extras import RealDictCursor
 from config import (
     get_legacy_db_config,
     get_operational_db_config,
+    get_analytics_db_config,
 )
 
 
 def connect(kind: str):
     """Connect with bounded exponential backoff; credentials come only from env."""
-    config = get_legacy_db_config() if kind == "legacy" else get_operational_db_config()
+    config = {
+        "legacy": get_legacy_db_config,
+        "operational": get_operational_db_config,
+        "analytics": get_analytics_db_config,
+    }[kind]()
     last_error = None
     for attempt in range(3):
         try:

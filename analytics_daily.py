@@ -40,7 +40,8 @@ def run_daily_analytics(*, reference: datetime | None = None, dry_run: bool | No
     business_date = previous_day(reference)
     if dry_run is None:
         dry_run = os.getenv("ANALYTICS_DRY_RUN", "true").lower() in {"1", "true", "yes"}
-    with connection("operational") as conn:
+    with connection("operational") as source, connection("analytics") as conn:
+        source.set_session(readonly=True, autocommit=False)
         with conn.cursor() as cur:
             cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (PIPELINE,))
             cur.execute(f"""SELECT source_table, extraction_mode::text, watermark_column, required
@@ -67,7 +68,7 @@ def run_daily_analytics(*, reference: datetime | None = None, dry_run: bool | No
                             raise RuntimeError(f"Tabela {source_table} sem watermark_column")
                         sql = f"SELECT * FROM {table_sql} WHERE {quote_identifier(watermark_column)} >= %s AND {quote_identifier(watermark_column)} < (%s::date + interval '1 day')"
                         params = (business_date, business_date)
-                    source_cur = conn.cursor(cursor_factory=RealDictCursor)
+                    source_cur = source.cursor(cursor_factory=RealDictCursor)
                     try:
                         source_cur.execute(sql, params); rows = source_cur.fetchall()
                     finally:
