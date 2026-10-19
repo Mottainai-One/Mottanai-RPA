@@ -8,6 +8,11 @@ venv/
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
+pytest-cache-files-*/
+migration_quarantine.json
+inspect_legacy_run.txt
+legacy_schema_report.txt
 
 # IDE
 .idea/
