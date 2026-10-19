@@ -1,0 +1,12 @@
+.git
+.github
+.env
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+*.pyc
+*.log
+logs/
+migration_quarantine.json

@@ -1,0 +1,21 @@
+name: RPA QA verification
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build QA image
+        run: docker build -f Dockerfile.qa -t mottainai-rpa:qa .
+      - name: Run RPA tests without production credentials
+        run: docker run --rm --network none mottainai-rpa:qa
