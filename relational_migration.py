@@ -113,6 +113,17 @@ def normalize_state(value: Any) -> str | None:
     return STATE_CODES.get(plain, text[:2].upper())
 
 
+def legacy_plan_id(company: dict[str, Any]) -> Any:
+    """Read the plan FK from the company row, where the legacy model stores it."""
+    for key in ("planid", "subscriptionplanid", "subscription_plan_id"):
+        if company.get(key) is not None:
+            return company[key]
+    raise ValueError(
+        f"Empresa {company.get('companyid')} sem coluna de plano reconhecida "
+        "(planid, subscriptionplanid ou subscription_plan_id)"
+    )
+
+
 def q(schema: str, table: str) -> str:
     return f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
@@ -210,9 +221,10 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
 
             # 2) Company, store, employee and account dependency chain.
             for item in source_data["company"]:
-                plan = next((p for p in source_data["subscriptionplan"] if p["companyid"] == item["companyid"]), None)
+                plan_id = legacy_plan_id(item)
+                plan = next((p for p in source_data["subscriptionplan"] if p["planid"] == plan_id), None)
                 if not plan:
-                    raise ValueError(f"Empresa {item['companyid']} sem plano legado")
+                    raise ValueError(f"Empresa {item['companyid']} referencia plano legado inexistente: {plan_id}")
                 values = {"plan_id": maps["plan"].get(plan["planid"], 0), "official_name": clean_text(item["officialname"]), "trade_name": clean_text(item.get("tradename")), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item.get("phone")), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["company"][item["companyid"]] = upsert(target_cursor, q(target_schema, "company"), values, "cnpj", "company_id")
                 counts["company"] += 1
