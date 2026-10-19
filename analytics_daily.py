@@ -1,61 +1,132 @@
-"""Carga diaria do operacional para o mart analitico."""
+"""Operational -> mottainai_analytics daily batch for PR 34."""
 from __future__ import annotations
-import logging
-import os
+import hashlib, json, logging, os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+from psycopg2.extras import Json, RealDictCursor
 from db import connection
+from pipeline import quote_identifier
 
 LOGGER = logging.getLogger("mottainai.analytics_daily")
 SAO_PAULO = ZoneInfo("America/Sao_Paulo")
+OPERATIONAL_SCHEMA = os.getenv("OPERATIONAL_SCHEMA", "mottainai")
+ANALYTICS_SCHEMA = os.getenv("ANALYTICS_SCHEMA", "mottainai_analytics")
+PIPELINE = "operational_to_analytics_daily"
+FORBIDDEN_KEYS = {"cpf","email","phone","full_name","customer_document","password","password_hash","refresh_token","refresh_token_hash","token_hash","recovery_token_hash","code_hash","firebase_uid","address_token","street","number","neighborhood","zip_code","old_data","new_data","stack_trace","parameters","payload","response","name_ciphertext","name_nonce","name_token","name_masked","cpf_ciphertext","cpf_nonce","cpf_masked","email_ciphertext","email_nonce","email_token","email_masked","phone_ciphertext","phone_nonce","phone_token","phone_masked","key_version","encrypted_at"}
 
 def previous_day(reference: datetime | None = None) -> date:
     now = reference.astimezone(SAO_PAULO) if reference else datetime.now(SAO_PAULO)
     return now.date() - timedelta(days=1)
 
+def sanitize(table: str, row: dict) -> dict:
+    result = {k: v for k, v in row.items() if k.lower() not in FORBIDDEN_KEYS}
+    if table == "address":
+        result = {k: row[k] for k in ("address_id","city","state","created_at","updated_at","deleted_at") if k in row}
+    elif table == "employee":
+        result = {k: result[k] for k in result if k != "name"}
+    return result
+
+def jsonable(value):
+    return value.isoformat() if isinstance(value, (datetime, date)) else value
+
+def source_key(table: str, row: dict) -> str:
+    for key in (f"{table}_id", "id", "source_id", "code"):
+        if row.get(key) is not None:
+            return str(row[key])
+    raw = json.dumps({k: jsonable(v) for k, v in row.items()}, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+def validate_source_contract(source, contracts) -> None:
+    """Validate the analytics contract against the live operational schema."""
+    required_tables = [table for table, _, _, required in contracts if required]
+    source_cur = source.cursor()
+    try:
+        source_cur.execute(
+            """SELECT table_name, column_name
+               FROM information_schema.columns
+              WHERE table_schema = %s
+                AND table_name = ANY(%s)""",
+            (OPERATIONAL_SCHEMA, [table for table, *_ in contracts]),
+        )
+        available = {}
+        for table_name, column_name in source_cur.fetchall():
+            available.setdefault(table_name, set()).add(column_name)
+    finally:
+        source_cur.close()
+
+    missing_tables = [table for table in required_tables if table not in available]
+    missing_watermarks = [
+        (table, watermark)
+        for table, mode, watermark, _ in contracts
+        if mode != "SNAPSHOT" and watermark and watermark not in available.get(table, set())
+    ]
+    if missing_tables or missing_watermarks:
+        details = []
+        if missing_tables:
+            details.append("tabelas obrigatorias ausentes: " + ", ".join(sorted(missing_tables)))
+        if missing_watermarks:
+            details.append(
+                "watermarks ausentes: "
+                + ", ".join(f"{table}.{column}" for table, column in missing_watermarks)
+            )
+        raise RuntimeError(
+            "Contrato analitico incompatível com o banco operacional "
+            f"({OPERATIONAL_SCHEMA}): " + "; ".join(details)
+        )
+
 def run_daily_analytics(*, reference: datetime | None = None, dry_run: bool | None = None):
-    target_date = previous_day(reference)
+    business_date = previous_day(reference)
     if dry_run is None:
         dry_run = os.getenv("ANALYTICS_DRY_RUN", "true").lower() in {"1", "true", "yes"}
-    with connection("operational") as conn:
+    with connection("operational") as source, connection("analytics") as conn:
+        source.set_session(readonly=True, autocommit=False)
         with conn.cursor() as cur:
-            cur.execute("SELECT pg_try_advisory_xact_lock(hashtext('mottainai.analytics.daily'))")
-            if not cur.fetchone()[0]:
-                raise RuntimeError("A carga analitica diaria ja esta em execucao")
-            cur.execute("""CREATE TABLE IF NOT EXISTS analytics.etl_run_log (
-                run_id bigserial PRIMARY KEY, pipeline_name text NOT NULL,
-                reference_date date NOT NULL, status text NOT NULL
-                    CHECK (status IN ('RUNNING','SUCCEEDED','FAILED')),
-                started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz,
-                rows_written integer, error_message text,
-                UNIQUE (pipeline_name, reference_date))""")
-            cur.execute("""INSERT INTO analytics.etl_run_log
-                (pipeline_name, reference_date, status)
-                VALUES ('operational_to_analytics_daily', %s, 'RUNNING')
-                ON CONFLICT (pipeline_name, reference_date) DO UPDATE SET
-                  status=CASE WHEN analytics.etl_run_log.status='SUCCEEDED'
-                    THEN 'SUCCEEDED' ELSE 'RUNNING' END,
-                  started_at=CASE WHEN analytics.etl_run_log.status='SUCCEEDED'
-                    THEN analytics.etl_run_log.started_at ELSE now() END,
-                  error_message=NULL RETURNING status""", (target_date,))
-            if cur.fetchone()[0] == "SUCCEEDED":
+            cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (PIPELINE,))
+            cur.execute(f"""SELECT source_table, extraction_mode::text, watermark_column, required
+                FROM {quote_identifier(ANALYTICS_SCHEMA)}.etl_source_contract
+                WHERE enabled AND payload_policy::text <> 'EXCLUDED' ORDER BY load_order""")
+            contracts = cur.fetchall()
+            if not contracts:
+                raise RuntimeError("Contrato etl_source_contract nao encontrado ou desabilitado")
+            validate_source_contract(source, contracts)
+            metadata = {"timezone":"America/Sao_Paulo", "rpa":"Mottanai-RPA", "dry_run":dry_run}
+            cur.execute(f"SELECT {quote_identifier(ANALYTICS_SCHEMA)}.fn_begin_daily_batch(%s, NULL, %s, %s)", (business_date, f"rpa-{business_date.isoformat()}", Json(metadata)))
+            batch_id = cur.fetchone()[0]
+            cur.execute(f"SELECT status::text FROM {quote_identifier(ANALYTICS_SCHEMA)}.etl_daily_batch WHERE batch_id=%s", (batch_id,))
+            if cur.fetchone()[0] == "PUBLISHED":
                 conn.rollback()
-                return {"reference_date": str(target_date), "status": "already_loaded", "dry_run": dry_run}
+                return {"batch_id": str(batch_id), "business_date": str(business_date), "status": "already_published"}
             try:
-                cur.execute("CALL analytics.refresh_facts(%s)", (target_date,))
-                cur.execute("""SELECT COALESCE(SUM(employees_total + users_total),0)
-                    FROM analytics.fact_store_daily
-                    WHERE date_key=to_char(%s,'YYYYMMDD')::integer""", (target_date,))
-                rows_written = int(cur.fetchone()[0])
+                expected_counts, staged_total = {}, 0
+                for source_table, extraction_mode, watermark_column, required in contracts:
+                    table_sql = f"{quote_identifier(OPERATIONAL_SCHEMA)}.{quote_identifier(source_table)}"
+                    if extraction_mode == "SNAPSHOT":
+                        sql, params = f"SELECT * FROM {table_sql}", ()
+                    else:
+                        if not watermark_column:
+                            raise RuntimeError(f"Tabela {source_table} sem watermark_column")
+                        sql = f"SELECT * FROM {table_sql} WHERE {quote_identifier(watermark_column)} >= %s AND {quote_identifier(watermark_column)} < (%s::date + interval '1 day')"
+                        params = (business_date, business_date)
+                    source_cur = source.cursor(cursor_factory=RealDictCursor)
+                    try:
+                        source_cur.execute(sql, params); rows = source_cur.fetchall()
+                    finally:
+                        source_cur.close()
+                    expected_counts[source_table] = len(rows)
+                    for row in rows:
+                        raw = dict(row); payload = sanitize(source_table, raw)
+                        updated = raw.get(watermark_column) if watermark_column else None
+                        cur.execute(f"""SELECT {quote_identifier(ANALYTICS_SCHEMA)}.fn_stage_operational_row(%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (batch_id, source_table, source_key(source_table, raw), Json({k:jsonable(v) for k,v in payload.items()}), raw.get("company_id"), raw.get("store_id"), raw.get("created_at"), updated, raw.get("deleted_at")))
+                        staged_total += int(bool(cur.fetchone()[0]))
+                cur.execute(f"SELECT {quote_identifier(ANALYTICS_SCHEMA)}.fn_reconcile_daily_batch(%s,%s)", (batch_id, Json(expected_counts)))
+                if not cur.fetchone()[0]:
+                    raise RuntimeError(f"Reconciliacao rejeitada para o batch {batch_id}")
+                cur.execute(f"SELECT {quote_identifier(ANALYTICS_SCHEMA)}.fn_mark_daily_batch_transformed(%s,%s,%s)", (batch_id, staged_total, Json({"source":"operational","date":str(business_date)})))
+                cur.execute(f"SELECT {quote_identifier(ANALYTICS_SCHEMA)}.fn_publish_daily_batch(%s)", (batch_id,))
+                result = {"batch_id":str(batch_id), "business_date":str(business_date), "rows_staged":staged_total}
                 if dry_run:
-                    conn.rollback()
-                    return {"reference_date": str(target_date), "status": "dry_run", "rows_written": rows_written, "dry_run": True}
-                cur.execute("""UPDATE analytics.etl_run_log
-                    SET status='SUCCEEDED', finished_at=now(), rows_written=%s
-                    WHERE pipeline_name='operational_to_analytics_daily' AND reference_date=%s""", (rows_written, target_date))
-                conn.commit()
-                return {"reference_date": str(target_date), "status": "succeeded", "rows_written": rows_written, "dry_run": False}
+                    conn.rollback(); result["status"] = "dry_run"; return result
+                conn.commit(); result["status"] = "published"; return result
             except Exception as exc:
-                conn.rollback()
-                LOGGER.exception("Falha na carga analitica de %s", target_date)
-                raise RuntimeError(f"Falha na carga analitica de {target_date}: {exc}") from exc
+                conn.rollback(); LOGGER.exception("Falha no batch analitico %s", batch_id)
+                raise RuntimeError(f"Falha no batch analitico {batch_id}: {exc}") from exc
