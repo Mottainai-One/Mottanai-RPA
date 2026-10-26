@@ -2,6 +2,7 @@
 
 from relational_migration import (
     clean_digits,
+    legacy_plan_id,
     normalize_state,
     preserve_or_protect_cpf,
     protected_token,
@@ -10,6 +11,11 @@ from relational_migration import (
 
 def test_company_tax_id_is_normalized_to_digits():
     assert clean_digits("04.252.011/0001-10") == "04252011000110"
+
+
+def test_company_plan_comes_from_company_foreign_key():
+    assert legacy_plan_id({"companyid": 42, "subscriptionplanid": 7}) == 7
+    assert legacy_plan_id({"companyid": 42, "planid": 9}) == 9
 
 
 def test_employee_cpf_is_protected_without_exposing_the_raw_value():
