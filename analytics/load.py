@@ -121,7 +121,21 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
             for dataset in DATASETS:
                 query = dataset.source_query.format(src=sql.Identifier(source_schema).as_string(source))
                 source_cursor.execute(query, (run_at.date(),) if dataset.snapshot else ())
-                source_rows.append((dataset, source_cursor.fetchall()))
+                rows = source_cursor.fetchall()
+                if dataset.target in ("fact_sales", "fact_inventory_snapshot"):
+                    table = "sales_transaction" if dataset.target == "fact_sales" else "inventory"
+                    predicate = sql.SQL("") if dataset.target == "fact_sales" else sql.SQL(" WHERE deleted_at IS NULL")
+                    source_cursor.execute(
+                        sql.SQL("SELECT count(*) FROM {}.{}{}").format(
+                            identifier(source_schema), sql.Identifier(table), predicate
+                        )
+                    )
+                    expected = source_cursor.fetchone()[0]
+                    if len(rows) != expected:
+                        raise RuntimeError(
+                            f"Source extraction lost {table} rows: expected={expected}, extracted={len(rows)}"
+                        )
+                source_rows.append((dataset, rows))
     with closing(psycopg2.connect(**analytics_config)) as target:
         try:
             with target.cursor() as target_cursor:
