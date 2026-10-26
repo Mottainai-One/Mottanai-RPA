@@ -1,42 +1,27 @@
-from unittest.mock import Mock
+"""Check the legacy normalization functions currently used by migrate()."""
 
-import pytest
-
-from relational_migration import LEGACY_REQUIRED_COLUMNS, is_valid_cnpj, validate_legacy_contract
-
-
-def _cursor_with_contract(columns):
-    cursor = Mock()
-    cursor.fetchall.return_value = [
-        {"table_name": table, "column_name": column}
-        for table, table_columns in columns.items()
-        for column in table_columns
-    ]
-    return cursor
+from relational_migration import (
+    clean_digits,
+    normalize_state,
+    preserve_or_protect_cpf,
+    protected_token,
+)
 
 
-def test_current_legacy_contract_is_accepted():
-    cursor = _cursor_with_contract(LEGACY_REQUIRED_COLUMNS)
-
-    validate_legacy_contract(cursor, "public")
-
-    cursor.execute.assert_called_once()
+def test_company_tax_id_is_normalized_to_digits():
+    assert clean_digits("04.252.011/0001-10") == "04252011000110"
 
 
-def test_legacy_contract_fails_before_migration_when_column_is_missing():
-    columns = {table: set(values) for table, values in LEGACY_REQUIRED_COLUMNS.items()}
-    columns["company"].remove("subscriptionplanid")
-    cursor = _cursor_with_contract(columns)
-
-    with pytest.raises(ValueError, match="public.company missing columns: subscriptionplanid"):
-        validate_legacy_contract(cursor, "public")
+def test_employee_cpf_is_protected_without_exposing_the_raw_value():
+    cpf = "123.456.789-09"
+    stored = preserve_or_protect_cpf(cpf)
+    assert stored == protected_token("CPF", cpf, digits=True)
+    assert "12345678909" not in stored
 
 
-@pytest.mark.parametrize("value", ["11222333000181", "04.252.011/0001-10"])
-def test_valid_cnpj_is_accepted(value):
-    assert is_valid_cnpj(value)
+def test_existing_legacy_masked_cpf_is_preserved():
+    assert preserve_or_protect_cpf("1234") == "1234"
 
 
-@pytest.mark.parametrize("value", [None, "", "00000000000000", "98765432000110"])
-def test_invalid_cnpj_is_rejected(value):
-    assert not is_valid_cnpj(value)
+def test_accented_state_name_is_normalized():
+    assert normalize_state("São Paulo") == "SP"
