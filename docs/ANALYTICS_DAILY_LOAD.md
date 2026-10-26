@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-O RPA legado → operacional pode rodar independentemente. Este segundo fluxo publica no analítico uma fotografia consistente do operacional uma vez por dia, com execução planejada para **02:00 no fuso America/Sao_Paulo**. Ela inclui as mudanças confirmadas até o início efetivo da leitura, inclusive as realizadas entre 00:00 e 02:00. O agendamento está definido em `dags/operational_to_analytics.py`, mas precisa ser ativado no executor escolhido. Também é possível executar manualmente com `python run_analytics.py`.
+O RPA legado → operacional pode rodar independentemente. Este segundo fluxo publica no analítico uma fotografia consistente do operacional uma vez por dia, com execução planejada para **02:00 no fuso America/Sao_Paulo**. Ela inclui as mudanças confirmadas até o início efetivo da leitura, inclusive as realizadas entre 00:00 e 02:00. O agendamento ativo após merge e configuração dos segredos é `.github/workflows/operational-to-analytics.yml`; consulte [o guia de implantação](GITHUB_DAILY_LOAD.md). A DAG em `dags/operational_to_analytics.py` é uma alternativa para uma futura instalação de Airflow. Também é possível executar manualmente com `python run_analytics.py`.
 
 Entre duas publicações concluídas, as consultas do dashboard usam a última fotografia publicada. Se a execução falhar, a transação do analítico é revertida e a versão anterior continua disponível. O horário real do corte fica em `mottainai_analytics.vw_published_batch.source_cutoff_at`; se o job começar atrasado, o corte também será posterior às 02:00.
 
@@ -11,7 +11,7 @@ Entre duas publicações concluídas, as consultas do dashboard usam a última f
 1. Instale os scripts do schema `mottainai` no banco operacional `MOTTAINAI` e os scripts de `database/analytics/install.sql` no banco físico `MOTTAINAI_ANALITICO`. No pgAdmin, use `install_pgadmin.sql` do repositório do banco para instalar sem comandos do psql.
 2. Copie `.env.example` para `.env` e preencha `OPERATIONAL_DB_*` e `ANALYTICS_DB_*`. Use contas distintas: leitura no operacional e escrita no analítico.
 3. Instale `requirements.txt`. Para agendamento, instale e configure Airflow separadamente e inclua este repositório no `PYTHONPATH` dos workers.
-4. Se houver histórico no antigo schema `MOTTAINAI.analytics`, execute `python -m analytics.bootstrap_history` uma vez. Execute `python run_analytics.py` manualmente e confira as contagens. Depois habilite o agendamento escolhido.
+4. Aplique `database/analytics/14_publish_mart_view.sql` no banco analítico antes de habilitar o agendamento. Se houver histórico no antigo schema `MOTTAINAI.analytics`, execute `python -m analytics.bootstrap_history` uma vez. Execute `python run_analytics.py` manualmente e confira as contagens.
 
 ## Dados carregados
 
@@ -32,7 +32,7 @@ O banco analítico possui outras tabelas de IA, fidelidade e sustentabilidade. E
 - A primeira execução carrega todos os registros das entidades acima. Cada execução seguinte reconcilia o histórico inteiro: dimensões usam `ON CONFLICT DO UPDATE` e fatos transacionais são substituídos dentro da transação. Isso captura correções e cancelamentos tardios mesmo porque `updated_at` não é atualizado automaticamente em todas as tabelas operacionais. É uma solução para a massa atual; antes de aumentar muito o volume, adicionar captura de alterações ou watermarks confiáveis.
 - O snapshot de estoque da data da execução é substituído dentro da mesma transação. Se a carga falhar, a transação do analítico é revertida.
 - A leitura usa uma transação `REPEATABLE READ`, mantendo uma visão consistente do operacional durante o lote. O processo grava a contagem por tabela no log e uma linha de sucesso em `mottainai_analytics.job_log`.
-- A carga atualiza `mv_dashboard_metrics` na mesma transação, depois de gravar os fatos. Para manter as métricas diárias coerentes, o dashboard deve consultar o analítico após a execução das 02:00.
+- A carga publica um `batch_id` em `job_log` e atualiza `mv_dashboard_metrics` na mesma transação que grava os fatos. `vw_published_batch` expõe apenas esse tipo de publicação. Para manter as métricas diárias coerentes, o dashboard deve consultar o analítico após a execução das 02:00.
 - Cálculos de janelas móveis e de validade usam a data de `vw_published_batch`, em vez do relógio da consulta, para não mudar antes da próxima publicação.
 - A leitura do operacional termina antes de abrir a conexão de escrita no analítico, respeitando o limite de conexões do Aiven Free. Para o volume atual, as linhas são mantidas em memória entre essas etapas.
 - Timestamps operacionais sem fuso são interpretados no destino como horários de São Paulo. Confirme que esse é o fuso usado pelo aplicativo antes da primeira carga real.

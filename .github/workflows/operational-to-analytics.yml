@@ -1,0 +1,55 @@
+name: Operational to analytics daily load
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+      timezone: America/Sao_Paulo
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: operational-to-analytics-daily
+  cancel-in-progress: false
+
+jobs:
+  load:
+    name: Publish analytical data mart
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
+      OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
+      OPERATIONAL_DB_NAME: ${{ secrets.OPERATIONAL_DB_NAME }}
+      OPERATIONAL_DB_USER: ${{ secrets.OPERATIONAL_DB_USER }}
+      OPERATIONAL_DB_PASSWORD: ${{ secrets.OPERATIONAL_DB_PASSWORD }}
+      OPERATIONAL_DB_SSLMODE: require
+      ANALYTICS_DB_HOST: ${{ secrets.ANALYTICS_DB_HOST }}
+      ANALYTICS_DB_PORT: ${{ secrets.ANALYTICS_DB_PORT }}
+      ANALYTICS_DB_NAME: ${{ secrets.ANALYTICS_DB_NAME }}
+      ANALYTICS_DB_USER: ${{ secrets.ANALYTICS_DB_USER }}
+      ANALYTICS_DB_PASSWORD: ${{ secrets.ANALYTICS_DB_PASSWORD }}
+      ANALYTICS_DB_SSLMODE: require
+      ANALYTICS_SOURCE_SCHEMA: mottainai
+      ANALYTICS_TARGET_SCHEMA: mottainai_analytics
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Check required database secrets
+        shell: bash
+        run: |
+          for name in OPERATIONAL_DB_HOST OPERATIONAL_DB_PORT OPERATIONAL_DB_NAME OPERATIONAL_DB_USER OPERATIONAL_DB_PASSWORD ANALYTICS_DB_HOST ANALYTICS_DB_PORT ANALYTICS_DB_NAME ANALYTICS_DB_USER ANALYTICS_DB_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing secret::$name is not configured"
+              exit 1
+            fi
+          done
+      - name: Install dependencies
+        run: pip install --requirement requirements.txt
+      - name: Reconcile and publish data mart
+        run: python -u run_analytics.py

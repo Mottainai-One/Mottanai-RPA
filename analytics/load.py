@@ -8,11 +8,13 @@ are not reliably maintained. No personal identifiers or credentials are read.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import psycopg2
@@ -99,11 +101,17 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
         missing = [field for field in ("dbname", "user", "password") if not config[field]]
         if missing:
             raise ValueError(f"Missing {name} connection settings: {', '.join(missing)}")
+    operational_config = get_operational_db_config()
+    analytics_config = get_analytics_db_config()
+    if (operational_config["host"], operational_config["port"], operational_config["dbname"]) == (
+        analytics_config["host"], analytics_config["port"], analytics_config["dbname"]
+    ):
+        raise ValueError("Operational and analytics must be different physical databases")
     counts: dict[str, int] = {}
     # Aiven Free has few connection slots. Read one consistent source snapshot,
     # release its connection, then apply everything in one target transaction.
     source_rows: list[tuple[Dataset, list[tuple]]] = []
-    with closing(psycopg2.connect(**get_operational_db_config())) as source:
+    with closing(psycopg2.connect(**operational_config)) as source:
         source.set_session(readonly=True)
         with source.cursor() as source_cursor:
             source_cursor.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -114,10 +122,22 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                 query = dataset.source_query.format(src=sql.Identifier(source_schema).as_string(source))
                 source_cursor.execute(query, (run_at.date(),) if dataset.snapshot else ())
                 source_rows.append((dataset, source_cursor.fetchall()))
-    with closing(psycopg2.connect(**get_analytics_db_config())) as target:
+    with closing(psycopg2.connect(**analytics_config)) as target:
         try:
             with target.cursor() as target_cursor:
                 target_cursor.execute("SET LOCAL TIME ZONE 'America/Sao_Paulo'")
+                target_cursor.execute(
+                    """SELECT obj_description(c.oid, 'pg_class')
+                       FROM pg_class c
+                       JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE n.nspname = %s AND c.relname = 'vw_published_batch'""",
+                    (target_schema,),
+                )
+                publication_view = target_cursor.fetchone()
+                if not publication_view or publication_view[0] != "publication_contract=analytics_mart_v1":
+                    raise RuntimeError(
+                        "Analytics publication view is not migrated; apply 14_publish_mart_view.sql first"
+                    )
                 for dataset, rows in source_rows:
                     if dataset.snapshot:
                         target_cursor.execute(
@@ -135,11 +155,35 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                     for start in range(0, written, batch_size):
                         batch = rows[start:start + batch_size]
                         execute_values(target_cursor, upsert, batch, page_size=batch_size)
+                    target_cursor.execute(
+                        sql.SQL("SELECT count(*) FROM {}.{}").format(
+                            identifier(target_schema), sql.Identifier(dataset.target)
+                        )
+                    )
+                    target_count = target_cursor.fetchone()[0]
+                    if dataset.snapshot:
+                        target_cursor.execute(
+                            sql.SQL("SELECT count(*) FROM {}.{} WHERE snapshot_date=%s").format(
+                                identifier(target_schema), sql.Identifier(dataset.target)
+                            ),
+                            (run_at.date(),),
+                        )
+                        target_count = target_cursor.fetchone()[0]
+                    if target_count != written:
+                        raise RuntimeError(
+                            f"Reconciliation failed for {dataset.target}: source={written}, target={target_count}"
+                        )
                     counts[dataset.target] = written
                     LOG.info("loaded %s rows into %s", written, dataset.target)
+                publication_id = uuid4()
                 target_cursor.execute(
-                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
-                    ("operational_to_analytics_daily", "SUCCEEDED", run_at, sum(counts.values()), sum(counts.values()), "{}"),
+                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, batch_id, cutoff_at, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
+                    (
+                        "operational_to_analytics_daily", "SUCCEEDED", run_at,
+                        sum(counts.values()), sum(counts.values()), publication_id,
+                        source_cutoff,
+                        json.dumps({"publication_contract": "analytics_mart_v1", "dataset_counts": counts}),
+                    ),
                 )
                 target_cursor.execute(
                     sql.SQL("REFRESH MATERIALIZED VIEW {}.mv_dashboard_metrics").format(identifier(target_schema))
