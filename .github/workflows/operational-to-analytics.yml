@@ -51,5 +51,8 @@ jobs:
           done
       - name: Install dependencies
         run: pip install --requirement requirements.txt
+      - name: Apply publication view migration on manual run
+        if: github.event_name == 'workflow_dispatch'
+        run: python -u -m analytics.migrate_publication
       - name: Reconcile and publish data mart
         run: python -u run_analytics.py
