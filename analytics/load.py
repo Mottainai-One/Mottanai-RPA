@@ -189,9 +189,11 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                         )
                     counts[dataset.target] = written
                     LOG.info("loaded %s rows into %s", written, dataset.target)
-                publication_id = uuid4()
+                # psycopg2 does not adapt Python UUID objects unless its UUID
+                # adapter is registered. Send a canonical string explicitly.
+                publication_id = str(uuid4())
                 target_cursor.execute(
-                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, batch_id, cutoff_at, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
+                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, batch_id, cutoff_at, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s::uuid, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
                     (
                         "operational_to_analytics_daily", "SUCCEEDED", run_at,
                         sum(counts.values()), sum(counts.values()), publication_id,
