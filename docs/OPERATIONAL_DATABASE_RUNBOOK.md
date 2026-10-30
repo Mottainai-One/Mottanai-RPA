@@ -179,6 +179,13 @@ Antes do `DRY_RUN`, configure no secret manager:
 - `EMPLOYEE_PII_LOOKUP_KEY_B64`: chave HMAC distinta, também com 32 bytes;
 - `EMPLOYEE_PII_KEY_VERSION`: inteiro positivo da versão ativa.
 
+O legado atual contém dados pessoais de funcionários já cifrados pelo backend
+do primeiro ano. O RPA interrompe a carga antes de escrever se encontrar CPF
+sem formato de texto. É necessário integrar o decifrador original, validar os
+campos decifrados em memória e só então protegê-los no contrato operacional.
+As duas chaves acima são do destino e não substituem a chave de origem. Não
+execute a carga real até essa integração ser validada.
+
 O login operacional deve ser membro apenas de `mottainai_migrator`. A carga
 assume essa role com `SET LOCAL ROLE`, estabelece o contexto da empresa e
 mantém RLS e auditoria ativos.

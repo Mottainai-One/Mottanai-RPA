@@ -311,6 +311,11 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                 "address", "employeerole", "subscriptionplan", "company", "store", "employee", "useraccount", "administration"
             )}
             LOGGER.info("Legacy snapshot read: %s", {name: len(items) for name, items in source_data.items()})
+            if any(len(clean_digits(item.get("cpf")) or "") != 11 for item in source_data["employee"]):
+                raise ValueError(
+                    "Legacy employee CPF is not plaintext. Decrypt and validate legacy PII "
+                    "with its original backend format before importing; refusing double encryption."
+                )
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
             employee_columns = table_columns(target_cursor, target_schema, "employee")
             app_user_columns = table_columns(target_cursor, target_schema, "app_user")
