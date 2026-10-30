@@ -4,12 +4,16 @@ from __future__ import annotations
 import logging
 import unicodedata
 import hashlib
+import hmac
+import base64
 import json
 import os
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any
 
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from psycopg2.extras import RealDictCursor
 
 from db import connection
@@ -27,6 +31,73 @@ STATE_CODES = {
     "sergipe": "SE", "tocantins": "TO",
 }
 BCRYPT_RE = re.compile(r"^\$2[aby]\$[0-3][0-9]\$[./A-Za-z0-9]{53}$")
+
+
+class EmployeeProtector:
+    """Create reversible employee envelopes and non-reversible lookup keys."""
+
+    def __init__(self, aes_key: bytes, lookup_key: bytes, key_version: int):
+        if len(aes_key) != 32 or len(lookup_key) != 32:
+            raise ValueError("Employee AES and lookup keys must each contain exactly 32 bytes")
+        if key_version <= 0 or key_version > 32767:
+            raise ValueError("EMPLOYEE_PII_KEY_VERSION must be between 1 and 32767")
+        self._aes = AESGCM(aes_key)
+        self._lookup_key = lookup_key
+        self.key_version = key_version
+
+    @classmethod
+    def from_environment(cls) -> "EmployeeProtector":
+        def decode(name: str) -> bytes:
+            value = os.getenv(name)
+            if not value:
+                raise ValueError(f"{name} is required for the employee PII migration")
+            try:
+                return base64.b64decode(value, validate=True)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be valid Base64") from exc
+
+        try:
+            key_version = int(os.getenv("EMPLOYEE_PII_KEY_VERSION", "1"))
+        except ValueError as exc:
+            raise ValueError("EMPLOYEE_PII_KEY_VERSION must be an integer") from exc
+        return cls(
+            decode("EMPLOYEE_PII_AES_KEY_B64"),
+            decode("EMPLOYEE_PII_LOOKUP_KEY_B64"),
+            key_version,
+        )
+
+    def lookup(self, field: str, value: Any, *, digits: bool = False) -> bytes | None:
+        normalized = clean_digits(value) if digits else clean_text(value)
+        if not normalized:
+            return None
+        if not digits:
+            normalized = normalized.casefold()
+        payload = f"mottainai:employee:{field}:v1:{normalized}".encode("utf-8")
+        return hmac.new(self._lookup_key, payload, hashlib.sha256).digest()
+
+    def encrypt(self, employee_id: int, field: str, value: Any) -> tuple[bytes | None, bytes | None]:
+        plaintext = clean_text(value)
+        if plaintext is None:
+            return None, None
+        nonce = os.urandom(12)
+        aad = f"mottainai:employee:{employee_id}:{field}:v1".encode("utf-8")
+        return self._aes.encrypt(nonce, plaintext.encode("utf-8"), aad), nonce
+
+
+def mask_name(employee_id: int) -> str:
+    return f"EMPLOYEE_{employee_id}"
+
+
+def mask_cpf(value: Any) -> str | None:
+    return None if clean_text(value) is None else "***.***.***-**"
+
+
+def mask_email(value: Any) -> str | None:
+    return None if clean_text(value) is None else "***@***"
+
+
+def mask_phone(value: Any) -> str | None:
+    return None if clean_text(value) is None else "***********"
 
 
 def clean_digits(value: Any) -> str | None:
@@ -133,6 +204,15 @@ def rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
     return [dict(row) for row in cur.fetchall()]
 
 
+def table_columns(cur, schema: str, table: str) -> set[str]:
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema=%s AND table_name=%s",
+        (schema, table),
+    )
+    return {row[0] for row in cur.fetchall()}
+
+
 def upsert(cur, target: str, values: dict[str, Any], conflict: str, primary_key: str) -> int:
     values = {key: value for key, value in values.items() if value is not None or key not in {"created_at", "updated_at"}}
     columns = list(values)
@@ -156,17 +236,29 @@ def upsert_address(cur, target: str, values: dict[str, Any]) -> int:
     return cur.fetchone()[0]
 
 
+def upsert_employee(cur, target: str, values: dict[str, Any]) -> int:
+    """Upsert employee through the stable, secret-keyed CPF lookup digest."""
+    values = {key: value for key, value in values.items() if value is not None or key not in {"created_at", "updated_at"}}
+    cur.execute(f"SELECT employee_id FROM {target} WHERE cpf_lookup_hmac=%s LIMIT 1", (values["cpf_lookup_hmac"],))
+    found = cur.fetchone()
+    if found:
+        updates = ", ".join(f"{quote_identifier(c)}=%s" for c in values if c not in {"cpf_lookup_hmac", "created_at"})
+        update_values = [values[c] for c in values if c not in {"cpf_lookup_hmac", "created_at"}]
+        cur.execute(f"UPDATE {target} SET {updates} WHERE employee_id=%s RETURNING employee_id", (*update_values, found[0]))
+        return cur.fetchone()[0]
+    columns = list(values)
+    cur.execute(f"INSERT INTO {target} ({', '.join(quote_identifier(c) for c in columns)}) VALUES ({', '.join(['%s'] * len(columns))}) RETURNING employee_id", [values[c] for c in columns])
+    return cur.fetchone()[0]
+
+
 def upsert_app_user(cur, target: str, values: dict[str, Any]) -> int:
-    """Upsert by either unique identity because employee_id and email are unique."""
+    """Upsert an account by the stable one-to-one employee relationship."""
     values = {key: value for key, value in values.items() if value is not None or key not in {"created_at", "updated_at"}}
     cur.execute(f"SELECT user_id FROM {target} WHERE employee_id=%s LIMIT 1", (values["employee_id"],))
     found = cur.fetchone()
-    if not found:
-        cur.execute(f"SELECT user_id FROM {target} WHERE email=%s LIMIT 1", (values["email"],))
-        found = cur.fetchone()
     if found:
-        updates = ", ".join(f"{quote_identifier(c)}=%s" for c in values if c not in {"employee_id", "email", "created_at"})
-        update_values = [values[c] for c in values if c not in {"employee_id", "email", "created_at"}]
+        updates = ", ".join(f"{quote_identifier(c)}=%s" for c in values if c not in {"employee_id", "created_at"})
+        update_values = [values[c] for c in values if c not in {"employee_id", "created_at"}]
         cur.execute(f"UPDATE {target} SET {updates} WHERE user_id=%s RETURNING user_id", (*update_values, found[0]))
         return cur.fetchone()[0]
     columns = list(values)
@@ -179,6 +271,7 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
     target_schema = settings.destination_schema
     counts = defaultdict(int)
     quarantine: list[dict[str, Any]] = []
+    protector = EmployeeProtector.from_environment()
 
     def quarantine_record(table: str, source_id: Any, reason: str) -> None:
         # Deliberately do not persist source payloads or secrets.
@@ -188,12 +281,15 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
         target_cursor = target.cursor()
         try:
             source_cursor.execute("SET TRANSACTION READ ONLY")
+            target_cursor.execute("SET LOCAL ROLE mottainai_migrator")
             # Read all source rows before changing the destination. This keeps a
             # consistent source snapshot and makes dry-run fully non-mutating.
             source_data = {name: rows(source_cursor, source_schema, name) for name in (
                 "address", "employeerole", "subscriptionplan", "company", "store", "employee", "useraccount", "administration"
             )}
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
+            employee_columns = table_columns(target_cursor, target_schema, "employee")
+            app_user_columns = table_columns(target_cursor, target_schema, "app_user")
 
             # 1) Independent entities.
             for item in source_data["address"]:
@@ -245,9 +341,57 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     "SELECT mottainai.fn_set_legacy_migration_context(%s)",
                     (operational_company_id,),
                 )
-                values = {"store_id": maps["store"].get(item["storeid"], 0), "role_id": maps["role"].get(item["roleid"], 0), "name": protected_employee_name(item["name"]), "cpf": preserve_or_protect_cpf(item["cpf"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "active": item["active"], "hire_date": item["hiredate"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
-                maps["employee"][item["employeeid"]] = upsert(target_cursor, q(target_schema, "employee"), values, "cpf", "employee_id")
+                if clean_text(item.get("name")) is None or clean_text(item.get("cpf")) is None:
+                    raise ValueError(
+                        f"Funcionário {item['employeeid']} sem nome/CPF recuperável para o envelope AES-GCM"
+                    )
+                values = {
+                    "store_id": maps["store"].get(item["storeid"], 0),
+                    "role_id": maps["role"].get(item["roleid"], 0),
+                    "cpf_lookup_hmac": protector.lookup("cpf", item["cpf"], digits=True),
+                    "email_lookup_hmac": protector.lookup("email", item.get("email")),
+                    "active": item["active"], "hire_date": item["hiredate"],
+                    "created_at": item.get("createdat"), "updated_at": item.get("updatedat"),
+                    "deleted_at": item.get("deletedat"),
+                }
+                legacy_values = {
+                    "name": protected_employee_name(item["name"]),
+                    "cpf": preserve_or_protect_cpf(item["cpf"]),
+                    "email": preserve_or_protect_email(item.get("email")),
+                    "phone": preserve_or_protect_phone(item.get("phone")),
+                }
+                values.update({key: value for key, value in legacy_values.items() if key in employee_columns})
+                employee_id = upsert_employee(target_cursor, q(target_schema, "employee"), values)
+                maps["employee"][item["employeeid"]] = employee_id
+
+                name_ciphertext, name_nonce = protector.encrypt(employee_id, "name", item["name"])
+                cpf_ciphertext, cpf_nonce = protector.encrypt(employee_id, "cpf", item["cpf"])
+                email_ciphertext, email_nonce = protector.encrypt(employee_id, "email", item.get("email"))
+                phone_ciphertext, phone_nonce = protector.encrypt(employee_id, "phone", item.get("phone"))
+                private_values = {
+                    "employee_id": employee_id,
+                    "name_ciphertext": name_ciphertext, "name_nonce": name_nonce,
+                    "name_masked": mask_name(employee_id),
+                    "cpf_ciphertext": cpf_ciphertext, "cpf_nonce": cpf_nonce,
+                    "cpf_masked": mask_cpf(item["cpf"]),
+                    "email_ciphertext": email_ciphertext, "email_nonce": email_nonce,
+                    "email_masked": mask_email(item.get("email")),
+                    "phone_ciphertext": phone_ciphertext, "phone_nonce": phone_nonce,
+                    "phone_masked": mask_phone(item.get("phone")),
+                    "key_version": protector.key_version,
+                    "algorithm": "AES-256-GCM", "protection_state": "ENCRYPTED",
+                    "encrypted_at": datetime.now(timezone.utc),
+                    "updated_at": item.get("updatedat"),
+                }
+                upsert(
+                    target_cursor,
+                    q(target_schema, "employee_private_data"),
+                    private_values,
+                    "employee_id",
+                    "employee_id",
+                )
                 counts["employee"] += 1
+                counts["employee_private_data"] += 1
 
             for item in source_data["useraccount"]:
                 employee = next((employee for employee in source_data["employee"] if employee["employeeid"] == item["employeeid"]), None)
@@ -257,9 +401,42 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     quarantine_record("useraccount", item["userid"], "password_hash não está em formato BCrypt")
                     counts["useraccount_quarantined"] += 1
                     continue
-                values = {"employee_id": maps["employee"].get(item["employeeid"], 0), "cpf": preserve_or_protect_cpf(employee["cpf"]), "email": preserve_or_protect_email(item["email"]), "password_hash": item["passwordhash"], "last_login": item.get("lastlogin"), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
+                source_store = next((store for store in source_data["store"] if store["storeid"] == employee["storeid"]), None)
+                if not source_store:
+                    raise ValueError(f"Usuário {item['userid']} referencia funcionário sem loja legada")
+                operational_company_id = maps["company"].get(source_store["companyid"])
+                target_cursor.execute(
+                    "SELECT mottainai.fn_set_legacy_migration_context(%s)",
+                    (operational_company_id,),
+                )
+                source_firebase_uid = clean_text(item.get("firebase_uid") or item.get("firebaseuid"))
+                target_cursor.execute(
+                    f"SELECT firebase_uid FROM {q(target_schema, 'app_user')} WHERE employee_id=%s LIMIT 1",
+                    (maps["employee"].get(item["employeeid"], 0),),
+                )
+                existing_account = target_cursor.fetchone()
+                effective_firebase_uid = source_firebase_uid or (
+                    existing_account[0] if existing_account else None
+                )
+                values = {
+                    "employee_id": maps["employee"].get(item["employeeid"], 0),
+                    "password_hash": item["passwordhash"], "last_login": item.get("lastlogin"),
+                    "active": bool(item["active"] and effective_firebase_uid),
+                    "created_at": item.get("createdat"), "updated_at": item.get("updatedat"),
+                    "deleted_at": item.get("deletedat"),
+                }
+                optional_values = {
+                    "cpf": preserve_or_protect_cpf(employee["cpf"]),
+                    "email": preserve_or_protect_email(item["email"]),
+                    "password_set": True,
+                }
+                if source_firebase_uid:
+                    optional_values["firebase_uid"] = source_firebase_uid
+                values.update({key: value for key, value in optional_values.items() if key in app_user_columns})
                 maps["user"][item["userid"]] = upsert_app_user(target_cursor, q(target_schema, "app_user"), values)
                 counts["system_user"] += 1
+                if not effective_firebase_uid:
+                    counts["app_user_pending_firebase"] += 1
 
             # Administration is not linked to employee in the target model.
             counts["administration"] = len(source_data["administration"])

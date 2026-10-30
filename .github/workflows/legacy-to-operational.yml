@@ -38,6 +38,9 @@ jobs:
       SOURCE_SCHEMA: public
       DESTINATION_SCHEMA: mottainai
       MIGRATION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      EMPLOYEE_PII_AES_KEY_B64: ${{ secrets.EMPLOYEE_PII_AES_KEY_B64 }}
+      EMPLOYEE_PII_LOOKUP_KEY_B64: ${{ secrets.EMPLOYEE_PII_LOOKUP_KEY_B64 }}
+      EMPLOYEE_PII_KEY_VERSION: ${{ vars.EMPLOYEE_PII_KEY_VERSION || '1' }}
 
     steps:
       - name: Check out repository

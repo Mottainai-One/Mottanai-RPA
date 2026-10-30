@@ -19,7 +19,12 @@ WHERE table_schema = 'mottainai'
 ORDER BY table_name;
 ```
 
-As tabelas-base esperadas são `address`, `employee_role`, `subscription_plan`, `company`, `retail_store`, `employee` e `app_user`.
+As tabelas-base esperadas são `address`, `employee_role`, `subscription_plan`,
+`company`, `retail_store`, `employee`, `employee_private_data` e `app_user`.
+
+O schema final não possui `employee.name/cpf/email/phone` nem
+`app_user.cpf/email`. A RPA detecta automaticamente a fase transitória, mas
+sempre grava o envelope em `employee_private_data`.
 
 ## 2. Funções de proteção
 
@@ -168,6 +173,16 @@ Todos os contadores de órfãos devem ser `0`.
 
 ## 7. Execução da RPA
 
+Antes do `DRY_RUN`, configure no secret manager:
+
+- `EMPLOYEE_PII_AES_KEY_B64`: chave AES de 32 bytes em Base64;
+- `EMPLOYEE_PII_LOOKUP_KEY_B64`: chave HMAC distinta, também com 32 bytes;
+- `EMPLOYEE_PII_KEY_VERSION`: inteiro positivo da versão ativa.
+
+O login operacional deve ser membro apenas de `mottainai_migrator`. A carga
+assume essa role com `SET LOCAL ROLE`, estabelece o contexto da empresa e
+mantém RLS e auditoria ativos.
+
 Teste seguro, sem persistir alterações:
 
 ```powershell
@@ -181,3 +196,8 @@ Carga definitiva — executada somente pelo responsável:
 $env:MIGRATION_DRY_RUN="false"
 .\.venv\Scripts\python.exe -u run_migration.py
 ```
+
+A migração relacional lê integralmente as tabelas de origem e faz upsert; ela
+não usa checkpoint externo. Depois de limpar um dataload de teste no
+operacional, a execução seguinte recompõe a carga completa sem alterar o banco
+legado. O agendamento de produção ocorre a cada 30 minutos.
