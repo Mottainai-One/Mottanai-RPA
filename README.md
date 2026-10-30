@@ -31,8 +31,9 @@ executado isoladamente.
 
 Crie um ambiente Python, instale `requirements.txt` e copie `.env.example` para `.env`. Preencha as credenciais dos bancos usados; `.env` não deve ser commitado. Instale o schema de destino pelos scripts do repositório de banco correspondente antes de executar o fluxo. Para a carga de BI, aplique `database/analytics/15_operational_kpi_facts.sql` do repositório do banco **no MOTTAINAI_ANALITICO** antes de usar esta versão da RPA; a carga interrompe com uma mensagem específica se os fatos estiverem ausentes. A migração do legado inicia em modo de simulação; defina `MIGRATION_DRY_RUN=false` somente quando quiser gravar no operacional. Consulte `docs/OPERATIONAL_DATABASE_RUNBOOK.md` para preparar esse banco.
 
-`LEGACY_PII_KEY_B64` deve ser a chave AES-256-GCM do backend do primeiro ano,
-em Base64, para decifrar os envelopes do legado. As chaves
+`LEGACY_PII_KEY_B64` pode identificar a chave AES-256-GCM de origem; quando
+ausente, o RPA reutiliza `EMPLOYEE_PII_AES_KEY_B64`, desde que seja a mesma
+chave configurada em `mottainai.crypto.key` no backend legado. As chaves
 `EMPLOYEE_PII_AES_KEY_B64` e `EMPLOYEE_PII_LOOKUP_KEY_B64` devem
 conter 32 bytes aleatórios codificados em Base64 e permanecer no secret
 manager. `EMPLOYEE_PII_KEY_VERSION` identifica a versão ativa para rotação.

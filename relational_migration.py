@@ -1,6 +1,7 @@
 """Data-only migration from the legacy public schema to operational mottainai."""
 from __future__ import annotations
 
+import binascii
 import logging
 import unicodedata
 import hashlib
@@ -14,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.exceptions import InvalidTag
 from psycopg2.extras import RealDictCursor
 
 from db import connection
@@ -100,15 +102,41 @@ class LegacyPiiDecryptor:
 
     @classmethod
     def from_environment(cls) -> "LegacyPiiDecryptor":
-        value = os.getenv("LEGACY_PII_KEY_B64")
+        # Keep compatibility with the setup where the same application AES
+        # key was registered as EMPLOYEE_PII_AES_KEY_B64. A dedicated source
+        # secret takes precedence when the key is rotated or separated later.
+        value = os.getenv("LEGACY_PII_KEY_B64") or os.getenv("EMPLOYEE_PII_AES_KEY_B64")
         if not value:
-            raise ValueError("LEGACY_PII_KEY_B64 is required to read encrypted legacy PII")
+            raise ValueError("LEGACY_PII_KEY_B64 or EMPLOYEE_PII_AES_KEY_B64 is required to read encrypted legacy PII")
         try:
             return cls(base64.b64decode(value, validate=True))
         except ValueError as exc:
             raise ValueError("LEGACY_PII_KEY_B64 must be valid Base64") from exc
 
-    def decrypt(self, value: Any) -> str | None:
+    @staticmethod
+    def _coherent_value(field: str, value: str) -> bool:
+        if not value or any(ord(char) < 32 for char in value):
+            return False
+        if field == "name":
+            return len(value) <= 150
+        if field == "cpf":
+            return valid_cpf(value) or is_legacy_masked_cpf(value)
+        if field == "email":
+            return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value)) or is_legacy_masked_email(value)
+        if field == "phone":
+            digits = clean_digits(value) or ""
+            return 10 <= len(digits) <= 15 or is_legacy_masked_phone(value)
+        return False
+
+    @classmethod
+    def _is_allowed_cleartext(cls, field: str, value: str) -> bool:
+        # Names must remain encrypted in the legacy source; only known
+        # irreversible markers are allowed to bypass decryption.
+        if field == "name":
+            return bool(re.fullmatch(r"(?:EMP_[0-9]+|ANON_[0-9a-fA-F-]{36})", value))
+        return cls._coherent_value(field, value)
+
+    def decrypt(self, value: Any, field: str) -> str | None:
         text = clean_text(value)
         if text is None:
             return None
@@ -116,15 +144,20 @@ class LegacyPiiDecryptor:
             decoded = base64.b64decode(text, validate=True)
             if len(decoded) < 12 + 16:
                 raise ValueError("legacy envelope is too short")
-            return self._aes.decrypt(decoded[:12], decoded[12:], None).decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
+            plaintext = self._aes.decrypt(decoded[:12], decoded[12:], None).decode("utf-8")
+            if not self._coherent_value(field, plaintext):
+                raise ValueError("decrypted value failed semantic validation")
+            return plaintext
+        except (ValueError, UnicodeDecodeError, InvalidTag, binascii.Error) as exc:
+            if self._is_allowed_cleartext(field, text):
+                return text
             raise ValueError("legacy PII value is not a valid AES-256-GCM envelope") from exc
 
     def decrypt_row(self, row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
         result = dict(row)
         for field in fields:
             if result.get(field) is not None:
-                result[field] = self.decrypt(result[field])
+                result[field] = self.decrypt(result[field], field)
         return result
 
 
@@ -163,6 +196,20 @@ def valid_cnpj(value: Any) -> bool:
     ):
         remainder = sum(n * w for n, w in zip(numbers[:length], weights)) % 11
         expected = 0 if remainder < 2 else 11 - remainder
+        if numbers[length] != expected:
+            return False
+    return True
+
+
+def valid_cpf(value: Any) -> bool:
+    digits = clean_digits(value)
+    if not digits or len(digits) != 11 or len(set(digits)) == 1:
+        return False
+    numbers = [int(char) for char in digits]
+    for length, start_weight in ((9, 10), (10, 11)):
+        total = sum(number * weight for number, weight in zip(numbers[:length], range(start_weight, 1, -1)))
+        remainder = (total * 10) % 11
+        expected = 0 if remainder == 10 else remainder
         if numbers[length] != expected:
             return False
     return True
@@ -355,13 +402,28 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                 "employee": ("name", "cpf", "email", "phone"),
                 "useraccount": ("email",),
             }
-            source_data = {
-                table: [legacy_pii.decrypt_row(item, encrypted_fields.get(table, ())) for item in items]
-                for table, items in source_data.items()
+            source_id_columns = {
+                "company": "companyid", "store": "storeid",
+                "employee": "employeeid", "useraccount": "userid",
             }
+            for table, fields in encrypted_fields.items():
+                decoded_rows = []
+                rejected = 0
+                for item in source_data[table]:
+                    try:
+                        decoded_rows.append(legacy_pii.decrypt_row(item, fields))
+                    except ValueError:
+                        rejected += 1
+                        quarantine_record(table, item[source_id_columns[table]], "dado pessoal inválido ou impossível de decifrar")
+                if rejected > max(2, len(source_data[table]) // 10):
+                    raise RuntimeError(
+                        f"Too many legacy PII decryption failures in {table}; verify LEGACY_PII_KEY_B64"
+                    )
+                if rejected:
+                    LOGGER.warning("Quarantined %s %s records with invalid encrypted PII", rejected, table)
+                    counts[f"{table}_pii_quarantined"] = rejected
+                source_data[table] = decoded_rows
             LOGGER.info("Legacy snapshot read: %s", {name: len(items) for name, items in source_data.items()})
-            if any(len(clean_digits(item.get("cpf")) or "") != 11 for item in source_data["employee"]):
-                raise ValueError("Legacy employee CPF is invalid after decryption; refusing the migration")
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
             employee_columns = table_columns(target_cursor, target_schema, "employee")
             app_user_columns = table_columns(target_cursor, target_schema, "app_user")
@@ -500,10 +562,10 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     "SELECT mottainai.fn_set_legacy_migration_context(%s)",
                     (operational_company_id,),
                 )
-                if clean_text(item.get("name")) is None or clean_text(item.get("cpf")) is None:
-                    raise ValueError(
-                        f"Funcionário {item['employeeid']} sem nome/CPF recuperável para o envelope AES-GCM"
-                    )
+                if clean_text(item.get("name")) is None or not valid_cpf(item.get("cpf")):
+                    quarantine_record("employee", item["employeeid"], "nome ou CPF inválido após decifragem")
+                    counts["employee_quarantined"] += 1
+                    continue
                 values = {
                     "store_id": maps["store"].get(item["storeid"], 0),
                     "role_id": maps["role"].get(item["roleid"], 0),

@@ -12,6 +12,7 @@ from relational_migration import (
     normalize_state,
     preserve_or_protect_cpf,
     protected_token,
+    valid_cpf,
     valid_cnpj,
 )
 
@@ -21,6 +22,12 @@ def test_company_tax_id_is_normalized_to_digits():
     assert valid_cnpj("04.252.011/0001-10")
     assert not valid_cnpj("04.252.011/0001-11")
     assert not valid_cnpj("00000000000000")
+
+
+def test_cpf_check_digits_are_validated():
+    assert valid_cpf("123.456.789-09")
+    assert not valid_cpf("123.456.789-00")
+    assert not valid_cpf("111.111.111-11")
 
 
 def test_company_plan_comes_from_company_foreign_key():
@@ -79,4 +86,24 @@ def test_legacy_backend_envelope_is_decrypted_from_iv_plus_gcm_payload():
     payload = AESGCM(key).encrypt(iv, b"123.456.789-09", None)
     envelope = base64.b64encode(iv + payload).decode()
 
-    assert LegacyPiiDecryptor(key).decrypt(envelope) == "123.456.789-09"
+    assert LegacyPiiDecryptor(key).decrypt(envelope, "cpf") == "123.456.789-09"
+
+
+def test_legacy_decoder_preserves_only_valid_clear_email_markers():
+    decoder = LegacyPiiDecryptor(bytes(range(32)))
+    assert decoder.decrypt("EMAIL_EMP_42", "email") == "EMAIL_EMP_42"
+    try:
+        decoder.decrypt("not-an-email", "email")
+    except ValueError as exc:
+        assert "legacy PII" in str(exc)
+    else:
+        raise AssertionError("invalid plaintext must not bypass legacy decryption")
+
+
+def test_legacy_decoder_uses_employee_aes_key_when_source_key_is_not_set(monkeypatch):
+    encoded = base64.b64encode(bytes(range(32))).decode()
+    monkeypatch.delenv("LEGACY_PII_KEY_B64", raising=False)
+    monkeypatch.setenv("EMPLOYEE_PII_AES_KEY_B64", encoded)
+
+    decoder = LegacyPiiDecryptor.from_environment()
+    assert decoder.decrypt("EMAIL_EMP_42", "email") == "EMAIL_EMP_42"

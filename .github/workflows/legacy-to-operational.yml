@@ -35,7 +35,7 @@ jobs:
       LEGACY_DB_NAME: ${{ secrets.LEGACY_DB_NAME }}
       LEGACY_DB_USER: ${{ secrets.LEGACY_DB_USER }}
       LEGACY_DB_PASSWORD: ${{ secrets.LEGACY_DB_PASSWORD }}
-      LEGACY_PII_KEY_B64: ${{ secrets.LEGACY_PII_KEY_B64 }}
+      LEGACY_PII_KEY_B64: ${{ secrets.LEGACY_PII_KEY_B64 || secrets.EMPLOYEE_PII_AES_KEY_B64 }}
       LEGACY_DB_SSLMODE: require
       OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
       OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
