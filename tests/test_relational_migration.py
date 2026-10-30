@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from relational_migration import (
     EmployeeProtector,
+    LegacyPiiDecryptor,
     clean_digits,
     legacy_plan_id,
     normalize_state,
@@ -70,3 +71,12 @@ def test_employee_keys_are_loaded_from_base64_environment(monkeypatch):
     monkeypatch.setenv("EMPLOYEE_PII_KEY_VERSION", "2")
 
     assert EmployeeProtector.from_environment().key_version == 2
+
+
+def test_legacy_backend_envelope_is_decrypted_from_iv_plus_gcm_payload():
+    key = bytes(range(32))
+    iv = bytes(reversed(range(12)))
+    payload = AESGCM(key).encrypt(iv, b"123.456.789-09", None)
+    envelope = base64.b64encode(iv + payload).decode()
+
+    assert LegacyPiiDecryptor(key).decrypt(envelope) == "123.456.789-09"

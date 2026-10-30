@@ -90,6 +90,44 @@ class EmployeeProtector:
         return self._aes.encrypt(nonce, plaintext.encode("utf-8"), aad), nonce
 
 
+class LegacyPiiDecryptor:
+    """Decode the first-year backend envelope: Base64(12-byte IV + GCM payload)."""
+
+    def __init__(self, key: bytes):
+        if len(key) != 32:
+            raise ValueError("LEGACY_PII_KEY_B64 must decode to exactly 32 bytes")
+        self._aes = AESGCM(key)
+
+    @classmethod
+    def from_environment(cls) -> "LegacyPiiDecryptor":
+        value = os.getenv("LEGACY_PII_KEY_B64")
+        if not value:
+            raise ValueError("LEGACY_PII_KEY_B64 is required to read encrypted legacy PII")
+        try:
+            return cls(base64.b64decode(value, validate=True))
+        except ValueError as exc:
+            raise ValueError("LEGACY_PII_KEY_B64 must be valid Base64") from exc
+
+    def decrypt(self, value: Any) -> str | None:
+        text = clean_text(value)
+        if text is None:
+            return None
+        try:
+            decoded = base64.b64decode(text, validate=True)
+            if len(decoded) < 12 + 16:
+                raise ValueError("legacy envelope is too short")
+            return self._aes.decrypt(decoded[:12], decoded[12:], None).decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError("legacy PII value is not a valid AES-256-GCM envelope") from exc
+
+    def decrypt_row(self, row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+        result = dict(row)
+        for field in fields:
+            if result.get(field) is not None:
+                result[field] = self.decrypt(result[field])
+        return result
+
+
 def mask_name(employee_id: int) -> str:
     return f"EMPLOYEE_{employee_id}"
 
@@ -295,6 +333,7 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
     counts = defaultdict(int)
     quarantine: list[dict[str, Any]] = []
     protector = EmployeeProtector.from_environment()
+    legacy_pii = LegacyPiiDecryptor.from_environment()
 
     def quarantine_record(table: str, source_id: Any, reason: str) -> None:
         # Deliberately do not persist source payloads or secrets.
@@ -310,12 +349,19 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
             source_data = {name: rows(source_cursor, source_schema, name) for name in (
                 "address", "employeerole", "subscriptionplan", "company", "store", "employee", "useraccount", "administration"
             )}
+            encrypted_fields = {
+                "company": ("email", "phone"),
+                "store": ("email", "phone"),
+                "employee": ("name", "cpf", "email", "phone"),
+                "useraccount": ("email",),
+            }
+            source_data = {
+                table: [legacy_pii.decrypt_row(item, encrypted_fields.get(table, ())) for item in items]
+                for table, items in source_data.items()
+            }
             LOGGER.info("Legacy snapshot read: %s", {name: len(items) for name, items in source_data.items()})
             if any(len(clean_digits(item.get("cpf")) or "") != 11 for item in source_data["employee"]):
-                raise ValueError(
-                    "Legacy employee CPF is not plaintext. Decrypt and validate legacy PII "
-                    "with its original backend format before importing; refusing double encryption."
-                )
+                raise ValueError("Legacy employee CPF is invalid after decryption; refusing the migration")
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
             employee_columns = table_columns(target_cursor, target_schema, "employee")
             app_user_columns = table_columns(target_cursor, target_schema, "app_user")

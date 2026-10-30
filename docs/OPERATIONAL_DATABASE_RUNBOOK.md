@@ -175,16 +175,16 @@ Todos os contadores de órfãos devem ser `0`.
 
 Antes do `DRY_RUN`, configure no secret manager:
 
+- `LEGACY_PII_KEY_B64`: a chave AES-256-GCM do backend do primeiro ano,
+  em Base64; ela é usada apenas para ler os envelopes existentes no legado;
 - `EMPLOYEE_PII_AES_KEY_B64`: chave AES de 32 bytes em Base64;
 - `EMPLOYEE_PII_LOOKUP_KEY_B64`: chave HMAC distinta, também com 32 bytes;
 - `EMPLOYEE_PII_KEY_VERSION`: inteiro positivo da versão ativa.
 
-O legado atual contém dados pessoais de funcionários já cifrados pelo backend
-do primeiro ano. O RPA interrompe a carga antes de escrever se encontrar CPF
-sem formato de texto. É necessário integrar o decifrador original, validar os
-campos decifrados em memória e só então protegê-los no contrato operacional.
-As duas chaves acima são do destino e não substituem a chave de origem. Não
-execute a carga real até essa integração ser validada.
+O legado atual contém dados pessoais cifrados pelo backend do primeiro ano. O
+RPA decifra os envelopes em memória, valida os campos e os protege novamente
+no contrato operacional. A chave de origem é separada das chaves do destino;
+não coloque a chave de origem em código ou no banco.
 
 O login operacional deve ser membro apenas de `mottainai_migrator`. A carga
 assume essa role com `SET LOCAL ROLE`, estabelece o contexto da empresa e
