@@ -75,6 +75,12 @@ class EmployeeProtector:
         payload = f"mottainai:employee:{field}:v1:{normalized}".encode("utf-8")
         return hmac.new(self._lookup_key, payload, hashlib.sha256).digest()
 
+    def fingerprint(self, source_table: str, row: dict[str, Any]) -> str:
+        """Keyed fingerprint prevents disclosure of low-entropy source fields."""
+        payload = json.dumps(row, sort_keys=True, default=str, ensure_ascii=False)
+        message = f"mottainai:legacy-sync:{source_table}:v1:{payload}".encode("utf-8")
+        return hmac.new(self._lookup_key, message, hashlib.sha256).hexdigest().upper()
+
     def encrypt(self, employee_id: int, field: str, value: Any) -> tuple[bytes | None, bytes | None]:
         plaintext = clean_text(value)
         if plaintext is None:
@@ -105,6 +111,23 @@ def clean_digits(value: Any) -> str | None:
         return None
     digits = "".join(ch for ch in str(value) if ch.isdigit())
     return digits or None
+
+
+def valid_cnpj(value: Any) -> bool:
+    """Mirror the operational check-digit rule before writing a company/store."""
+    digits = clean_digits(value)
+    if not digits or len(digits) != 14 or len(set(digits)) == 1:
+        return False
+    numbers = [int(char) for char in digits]
+    for length, weights in (
+        (12, (5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2)),
+        (13, (6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2)),
+    ):
+        remainder = sum(n * w for n, w in zip(numbers[:length], weights)) % 11
+        expected = 0 if remainder < 2 else 11 - remainder
+        if numbers[length] != expected:
+            return False
+    return True
 
 
 def clean_text(value: Any) -> str | None:
@@ -287,12 +310,48 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
             source_data = {name: rows(source_cursor, source_schema, name) for name in (
                 "address", "employeerole", "subscriptionplan", "company", "store", "employee", "useraccount", "administration"
             )}
+            LOGGER.info("Legacy snapshot read: %s", {name: len(items) for name, items in source_data.items()})
             maps: dict[str, dict[Any, Any]] = defaultdict(dict)
             employee_columns = table_columns(target_cursor, target_schema, "employee")
             app_user_columns = table_columns(target_cursor, target_schema, "app_user")
+            target_cursor.execute(
+                f"SELECT source_table, source_record_id, target_record_id, payload_sha256 "
+                f"FROM {q(target_schema, 'legacy_sync_record')} "
+                "WHERE source_system='LEGACY_POSTGRES' AND sync_status='APPLIED'"
+            )
+            sync_index = {(table, source_id): (int(target_id), digest)
+                          for table, source_id, target_id, digest in target_cursor.fetchall()}
+            force_full = os.getenv("MIGRATION_FORCE_FULL", "false").lower() in {"1", "true", "yes"}
+
+            def prior_target(table: str, item: dict[str, Any], source_id: Any) -> int | None:
+                previous = sync_index.get((table, str(source_id)))
+                if previous and not force_full and previous[1] == protector.fingerprint(table, item):
+                    counts[f"{table}_unchanged"] += 1
+                    return previous[0]
+                return None
+
+            def record_sync(table: str, item: dict[str, Any], source_id: Any,
+                            target_table: str, target_id: int) -> None:
+                target_cursor.execute(
+                    f"INSERT INTO {q(target_schema, 'legacy_sync_record')} "
+                    "(source_system, source_table, source_record_id, target_table, "
+                    "target_record_id, payload_sha256, sync_status) "
+                    "VALUES ('LEGACY_POSTGRES', %s, %s, %s, %s, %s, 'APPLIED') "
+                    "ON CONFLICT (source_system, source_table, source_record_id) "
+                    "DO UPDATE SET target_table=EXCLUDED.target_table, "
+                    "target_record_id=EXCLUDED.target_record_id, "
+                    "payload_sha256=EXCLUDED.payload_sha256, sync_status='APPLIED', "
+                    "synchronized_at=now(), error_code=NULL",
+                    (table, str(source_id), target_table, str(target_id),
+                     protector.fingerprint(table, item)),
+                )
 
             # 1) Independent entities.
             for item in source_data["address"]:
+                prior = prior_target("address", item, item["addressid"])
+                if prior is not None:
+                    maps["address"][item["addressid"]] = prior
+                    continue
                 values = {
                     "zip_code": (clean_digits(item["zipcode"]) or "")[:8],
                     "street": clean_text(item["street"]), "number": clean_text(item["number"]),
@@ -301,36 +360,85 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat"),
                 }
                 maps["address"][item["addressid"]] = upsert_address(target_cursor, q(target_schema, "address"), values)
+                record_sync("address", item, item["addressid"], "address", maps["address"][item["addressid"]])
                 counts["address"] += 1
 
             for item in source_data["employeerole"]:
+                prior = prior_target("employeerole", item, item["roleid"])
+                if prior is not None:
+                    maps["role"][item["roleid"]] = prior
+                    continue
                 values = {"name": clean_text(item["name"]), "description": clean_text(item.get("description")), "permission_level": item["permissionlevel"], "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["role"][item["roleid"]] = upsert(target_cursor, q(target_schema, "employee_role"), values, "name", "role_id")
+                record_sync("employeerole", item, item["roleid"], "employee_role", maps["role"][item["roleid"]])
                 counts["employee_role"] += 1
 
             # Legacy plans are attached to companies; the operational model is
             # the inverse, so first create plans keyed by their unique name.
             for item in source_data["subscriptionplan"]:
+                prior = prior_target("subscriptionplan", item, item["planid"])
+                if prior is not None:
+                    maps["plan"][item["planid"]] = prior
+                    continue
                 values = {"name": clean_text(item["name"]), "description": clean_text(item["description"]), "price": item["price"], "store_limit": item["storelimit"], "user_limit": item["userlimit"], "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["plan"][item["planid"]] = upsert(target_cursor, q(target_schema, "subscription_plan"), values, "name", "plan_id")
+                record_sync("subscriptionplan", item, item["planid"], "subscription_plan", maps["plan"][item["planid"]])
                 counts["subscription_plan"] += 1
 
             # 2) Company, store, employee and account dependency chain.
             for item in source_data["company"]:
+                if not valid_cnpj(item.get("cnpj")):
+                    quarantine_record("company", item["companyid"], "CNPJ inválido")
+                    counts["company_quarantined"] += 1
+                    continue
+                prior = prior_target("company", item, item["companyid"])
+                if prior is not None:
+                    maps["company"][item["companyid"]] = prior
+                    continue
                 plan_id = legacy_plan_id(item)
                 plan = next((p for p in source_data["subscriptionplan"] if p["planid"] == plan_id), None)
                 if not plan:
                     raise ValueError(f"Empresa {item['companyid']} referencia plano legado inexistente: {plan_id}")
                 values = {"plan_id": maps["plan"].get(plan["planid"], 0), "official_name": clean_text(item["officialname"]), "trade_name": clean_text(item.get("tradename")), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item.get("phone")), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["company"][item["companyid"]] = upsert(target_cursor, q(target_schema, "company"), values, "cnpj", "company_id")
+                record_sync("company", item, item["companyid"], "company", maps["company"][item["companyid"]])
                 counts["company"] += 1
 
+            LOGGER.info("Company phase completed: %s loaded, %s quarantined", counts["company"], counts["company_quarantined"])
+
             for item in source_data["store"]:
+                if item["companyid"] not in maps["company"]:
+                    quarantine_record("store", item["storeid"], "empresa não migrada")
+                    counts["store_quarantined"] += 1
+                    continue
+                if not valid_cnpj(item.get("cnpj")):
+                    quarantine_record("store", item["storeid"], "CNPJ inválido")
+                    counts["store_quarantined"] += 1
+                    continue
+                prior = prior_target("store", item, item["storeid"])
+                if prior is not None:
+                    maps["store"][item["storeid"]] = prior
+                    continue
+                target_cursor.execute(
+                    "SELECT mottainai.fn_set_legacy_migration_context(%s)",
+                    (maps["company"][item["companyid"]],),
+                )
                 values = {"company_id": maps["company"].get(item["companyid"], 0), "address_id": maps["address"].get(item["addressid"], 0), "name": clean_text(item["name"]), "cnpj": clean_digits(item["cnpj"]), "email": preserve_or_protect_email(item["email"]), "phone": preserve_or_protect_phone(item["phone"]), "active": item["active"], "created_at": item.get("createdat"), "updated_at": item.get("updatedat"), "deleted_at": item.get("deletedat")}
                 maps["store"][item["storeid"]] = upsert(target_cursor, q(target_schema, "retail_store"), values, "cnpj", "store_id")
+                record_sync("store", item, item["storeid"], "retail_store", maps["store"][item["storeid"]])
                 counts["retail_store"] += 1
 
+            LOGGER.info("Store phase completed: %s loaded, %s quarantined", counts["retail_store"], counts["store_quarantined"])
+
             for item in source_data["employee"]:
+                if item["storeid"] not in maps["store"]:
+                    quarantine_record("employee", item["employeeid"], "loja não migrada")
+                    counts["employee_quarantined"] += 1
+                    continue
+                prior = prior_target("employee", item, item["employeeid"])
+                if prior is not None:
+                    maps["employee"][item["employeeid"]] = prior
+                    continue
                 source_store = next((store for store in source_data["store"] if store["storeid"] == item["storeid"]), None)
                 if not source_store:
                     raise ValueError(f"Funcionário {item['employeeid']} sem loja legada")
@@ -390,10 +498,21 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     "employee_id",
                     "employee_id",
                 )
+                record_sync("employee", item, item["employeeid"], "employee", employee_id)
                 counts["employee"] += 1
                 counts["employee_private_data"] += 1
 
+            LOGGER.info("Employee phase completed: %s loaded, %s quarantined", counts["employee"], counts["employee_quarantined"])
+
             for item in source_data["useraccount"]:
+                if item["employeeid"] not in maps["employee"]:
+                    quarantine_record("useraccount", item["userid"], "funcionário não migrado")
+                    counts["useraccount_quarantined"] += 1
+                    continue
+                prior = prior_target("useraccount", item, item["userid"])
+                if prior is not None:
+                    maps["user"][item["userid"]] = prior
+                    continue
                 employee = next((employee for employee in source_data["employee"] if employee["employeeid"] == item["employeeid"]), None)
                 if not employee:
                     raise ValueError(f"Usuário {item['userid']} sem funcionário legado")
@@ -434,6 +553,7 @@ def migrate(settings: Settings, dry_run: bool = True) -> dict[str, int]:
                     optional_values["firebase_uid"] = source_firebase_uid
                 values.update({key: value for key, value in optional_values.items() if key in app_user_columns})
                 maps["user"][item["userid"]] = upsert_app_user(target_cursor, q(target_schema, "app_user"), values)
+                record_sync("useraccount", item, item["userid"], "app_user", maps["user"][item["userid"]])
                 counts["system_user"] += 1
                 if not effective_firebase_uid:
                     counts["app_user_pending_firebase"] += 1

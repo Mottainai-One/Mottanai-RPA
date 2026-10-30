@@ -3,12 +3,19 @@ name: Legacy to operational synchronization
 on:
   schedule:
     - cron: "*/5 * * * *"
+    - cron: "1 1 * * *"
+      timezone: America/Sao_Paulo
   workflow_dispatch:
     inputs:
       dry_run:
         description: Validate and roll back instead of committing
         required: true
         default: true
+        type: boolean
+      force_full:
+        description: Reconcile every legacy row, ignoring saved fingerprints
+        required: true
+        default: false
         type: boolean
 
 concurrency:
@@ -38,6 +45,7 @@ jobs:
       SOURCE_SCHEMA: public
       DESTINATION_SCHEMA: mottainai
       MIGRATION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      MIGRATION_FORCE_FULL: ${{ github.event.schedule == '1 1 * * *' || (github.event_name == 'workflow_dispatch' && inputs.force_full) || 'false' }}
       EMPLOYEE_PII_AES_KEY_B64: ${{ secrets.EMPLOYEE_PII_AES_KEY_B64 }}
       EMPLOYEE_PII_LOOKUP_KEY_B64: ${{ secrets.EMPLOYEE_PII_LOOKUP_KEY_B64 }}
       EMPLOYEE_PII_KEY_VERSION: ${{ vars.EMPLOYEE_PII_KEY_VERSION || '1' }}

@@ -197,7 +197,13 @@ $env:MIGRATION_DRY_RUN="false"
 .\.venv\Scripts\python.exe -u run_migration.py
 ```
 
-A migração relacional lê integralmente as tabelas de origem e faz upsert; ela
-não usa checkpoint externo. Depois de limpar um dataload de teste no
-operacional, a execução seguinte recompõe a carga completa sem alterar o banco
-legado. O agendamento de produção ocorre a cada 5 minutos, sujeito à fila do GitHub Actions.
+A migração relacional lê integralmente as tabelas de origem. Depois de limpar
+um dataload de teste no operacional, execute manualmente com `force_full=true`
+para recompor a carga sem alterar o banco legado. O agendamento normal consulta
+o legado a cada 5 minutos e evita regravar
+linhas com o mesmo HMAC de conteúdo em `legacy_sync_record`. Uma reconciliação
+completa roda às 01:01 de São Paulo para corrigir desvios. Uma carga completa
+levou cerca de 5m27s no teste de 30/10/2026; o GitHub Actions pode atrasar ou
+enfileirar execuções, portanto 5 minutos é a frequência solicitada, não uma
+garantia de latência. CNPJs inválidos são colocados em quarentena pelo ID de
+origem, sem alterar o identificador nem afrouxar as regras do operacional.

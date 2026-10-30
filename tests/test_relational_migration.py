@@ -11,11 +11,15 @@ from relational_migration import (
     normalize_state,
     preserve_or_protect_cpf,
     protected_token,
+    valid_cnpj,
 )
 
 
 def test_company_tax_id_is_normalized_to_digits():
     assert clean_digits("04.252.011/0001-10") == "04252011000110"
+    assert valid_cnpj("04.252.011/0001-10")
+    assert not valid_cnpj("04.252.011/0001-11")
+    assert not valid_cnpj("00000000000000")
 
 
 def test_company_plan_comes_from_company_foreign_key():
