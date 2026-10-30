@@ -2,7 +2,7 @@ name: Legacy to operational synchronization
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -51,6 +51,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Check required database and encryption secrets
+        shell: bash
+        run: |
+          for name in LEGACY_DB_HOST LEGACY_DB_PORT LEGACY_DB_NAME LEGACY_DB_USER LEGACY_DB_PASSWORD OPERATIONAL_DB_HOST OPERATIONAL_DB_PORT OPERATIONAL_DB_NAME OPERATIONAL_DB_USER OPERATIONAL_DB_PASSWORD EMPLOYEE_PII_AES_KEY_B64 EMPLOYEE_PII_LOOKUP_KEY_B64; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing secret::$name is not configured"
+              exit 1
+            fi
+          done
 
       - name: Install runtime dependencies
         run: pip install --requirement requirements.txt

@@ -200,4 +200,4 @@ $env:MIGRATION_DRY_RUN="false"
 A migração relacional lê integralmente as tabelas de origem e faz upsert; ela
 não usa checkpoint externo. Depois de limpar um dataload de teste no
 operacional, a execução seguinte recompõe a carga completa sem alterar o banco
-legado. O agendamento de produção ocorre a cada 30 minutos.
+legado. O agendamento de produção ocorre a cada 5 minutos, sujeito à fila do GitHub Actions.

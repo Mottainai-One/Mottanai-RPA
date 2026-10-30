@@ -14,6 +14,6 @@ def execute():
     return migrate(Settings(), dry_run=False)
 
 if DAG:
-    with DAG("mottainai_rpa", start_date=datetime(2026, 1, 1), schedule="*/30 * * * *", catchup=False,
+    with DAG("mottainai_rpa", start_date=datetime(2026, 1, 1), schedule="*/5 * * * *", catchup=False,
              default_args={"retries": 3, "retry_delay": timedelta(minutes=5)}, tags=["mottainai", "integration"]):
         PythonOperator(task_id="sync_database", python_callable=execute)
