@@ -25,6 +25,24 @@ def test_operational_kpi_sources_are_materialized_without_sensitive_columns():
         assert "description" not in dataset.columns
 
 
+def test_partitioned_kpi_facts_include_the_partition_column_in_the_upsert_key():
+    by_target = {dataset.target: dataset for dataset in DATASETS}
+    partition_columns = {
+        "fact_inventory_count_line": "count_date",
+        "fact_transfer_line": "request_date",
+        "fact_replenishment_plan_line": "generated_at",
+        "fact_replenishment_execution_line": "started_at",
+        "fact_donation_line": "donation_date",
+        "fact_disposal_line": "disposal_date",
+        "fact_alert_lifecycle": "generated_at",
+        "fact_action_lifecycle": "generated_at",
+    }
+    for table, partition_column in partition_columns.items():
+        dataset = by_target[table]
+        assert partition_column in dataset.columns
+        assert partition_column in dataset.key
+
+
 def test_schema_name_validation_rejects_sql_injection():
     with pytest.raises(ValueError):
         identifier("mottainai; DROP SCHEMA public")
