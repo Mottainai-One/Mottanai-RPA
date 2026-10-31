@@ -19,7 +19,12 @@ WHERE table_schema = 'mottainai'
 ORDER BY table_name;
 ```
 
-As tabelas-base esperadas são `address`, `employee_role`, `subscription_plan`, `company`, `retail_store`, `employee` e `app_user`.
+As tabelas-base esperadas são `address`, `employee_role`, `subscription_plan`,
+`company`, `retail_store`, `employee`, `employee_private_data` e `app_user`.
+
+O schema final não possui `employee.name/cpf/email/phone` nem
+`app_user.cpf/email`. A RPA detecta automaticamente a fase transitória, mas
+sempre grava o envelope em `employee_private_data`.
 
 ## 2. Funções de proteção
 
@@ -168,6 +173,25 @@ Todos os contadores de órfãos devem ser `0`.
 
 ## 7. Execução da RPA
 
+Antes do `DRY_RUN`, configure no secret manager:
+
+- `LEGACY_PII_KEY_B64`: opcional; quando configurada, é a chave AES-256-GCM do
+  backend do primeiro ano em Base64. Se ausente, o RPA usa
+  `EMPLOYEE_PII_AES_KEY_B64`, que precisa corresponder a
+  `mottainai.crypto.key` no backend legado;
+- `EMPLOYEE_PII_AES_KEY_B64`: chave AES de 32 bytes em Base64;
+- `EMPLOYEE_PII_LOOKUP_KEY_B64`: chave HMAC distinta, também com 32 bytes;
+- `EMPLOYEE_PII_KEY_VERSION`: inteiro positivo da versão ativa.
+
+O legado atual contém dados pessoais cifrados pelo backend do primeiro ano. O
+RPA decifra os envelopes em memória, valida os campos e os protege novamente
+no contrato operacional. Nunca coloque a chave em código ou no banco. Um
+secret separado para a origem permite rotacionar as chaves independentemente.
+
+O login operacional deve ser membro apenas de `mottainai_migrator`. A carga
+assume essa role com `SET LOCAL ROLE`, estabelece o contexto da empresa e
+mantém RLS e auditoria ativos.
+
 Teste seguro, sem persistir alterações:
 
 ```powershell
@@ -181,3 +205,14 @@ Carga definitiva — executada somente pelo responsável:
 $env:MIGRATION_DRY_RUN="false"
 .\.venv\Scripts\python.exe -u run_migration.py
 ```
+
+A migração relacional lê integralmente as tabelas de origem. Depois de limpar
+um dataload de teste no operacional, execute manualmente com `force_full=true`
+para recompor a carga sem alterar o banco legado. O agendamento normal consulta
+o legado a cada 5 minutos e evita regravar
+linhas com o mesmo HMAC de conteúdo em `legacy_sync_record`. Uma reconciliação
+completa roda às 01:01 de São Paulo para corrigir desvios. Uma carga completa
+levou cerca de 5m27s no teste de 30/10/2026; o GitHub Actions pode atrasar ou
+enfileirar execuções, portanto 5 minutos é a frequência solicitada, não uma
+garantia de latência. CNPJs inválidos são colocados em quarentena pelo ID de
+origem, sem alterar o identificador nem afrouxar as regras do operacional.

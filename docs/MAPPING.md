@@ -17,8 +17,9 @@ O banco operacional define, entre outras, as tabelas:
 | 3 | `company` | `subscription_plan` |
 | 4 | `employee_role` | — |
 | 5 | `retail_store` | `company`, `address` |
-| 6 | `employee` | `retail_store`, `employee_role` |
-| 7 | `app_user` | `employee` |
+| 6 | `employee` | `retail_store`, `employee_role`; mantém somente HMACs de CPF/e-mail para busca |
+| 7 | `employee_private_data` | `employee`; envelopes AES-256-GCM de nome, CPF, e-mail e telefone |
+| 8 | `app_user` | `employee`; não duplica CPF/e-mail |
 
 Depois dessas tabelas-base, a carga pode avançar para catálogo, compras/recebimento, estoque, vendas, transferências, doações, descarte, reposição, alertas e inventário.
 
@@ -32,6 +33,14 @@ Depois dessas tabelas-base, a carga pode avançar para catálogo, compras/recebi
 - Datas inválidas ou campos obrigatórios ausentes vão para quarentena.
 - `deleted_at` deve ser preservado para respeitar soft delete.
 - Senhas nunca devem ser migradas em texto puro; `password_hash` só pode receber hashes compatíveis e previamente autorizados.
+- nome, CPF, e-mail e telefone do funcionário são cifrados separadamente com
+  AES-256-GCM, nonce aleatório de 12 bytes e AAD
+  `mottainai:employee:<employee_id>:<campo>:v1`;
+- os HMAC-SHA-256 de CPF e e-mail usam chave externa e separação de domínio;
+- a recuperação possível no operacional é exatamente a do valor recebido da
+  origem: dado já mascarado ou irreversível no legado não volta a ser aberto;
+- `app_user` não recebe CPF/e-mail; sem `firebase_uid`, a conta entra inativa
+  até o backend concluir o convite no Firebase.
 
 ## Pontos ainda necessários
 
@@ -48,4 +57,9 @@ Por isso, a execução produtiva deve começar com `DRY_RUN=true` e com a inspe�
 
 ## Usuários e senhas
 
-As contas devem ser migradas depois de `employee`, preservando o vínculo `app_user.employee_id`. Se o legado já guardar um hash compatível, o hash pode ser transportado sem conhecer a senha. Se guardar senha em texto puro, ela não deve ser copiada: o processo deve gerar um hash forte no destino ou forçar redefinição no primeiro acesso. A RPA nunca deve registrar senhas em logs, auditoria ou quarentena.
+As contas devem ser migradas depois de `employee_private_data`, preservando o
+vínculo `app_user.employee_id`. Se o legado já guardar um hash compatível, o
+hash pode ser transportado sem conhecer a senha. Se guardar senha em texto
+puro, ela não deve ser copiada: o processo deve forçar redefinição no primeiro
+acesso. A RPA nunca registra senha, chave, plaintext ou envelope em logs,
+auditoria ou quarentena.

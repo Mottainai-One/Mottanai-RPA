@@ -2,13 +2,20 @@ name: Legacy to operational synchronization
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
+    - cron: "1 1 * * *"
+      timezone: America/Sao_Paulo
   workflow_dispatch:
     inputs:
       dry_run:
         description: Validate and roll back instead of committing
         required: true
         default: true
+        type: boolean
+      force_full:
+        description: Reconcile every legacy row, ignoring saved fingerprints
+        required: true
+        default: false
         type: boolean
 
 concurrency:
@@ -28,6 +35,7 @@ jobs:
       LEGACY_DB_NAME: ${{ secrets.LEGACY_DB_NAME }}
       LEGACY_DB_USER: ${{ secrets.LEGACY_DB_USER }}
       LEGACY_DB_PASSWORD: ${{ secrets.LEGACY_DB_PASSWORD }}
+      LEGACY_PII_KEY_B64: ${{ secrets.LEGACY_PII_KEY_B64 || secrets.EMPLOYEE_PII_AES_KEY_B64 }}
       LEGACY_DB_SSLMODE: require
       OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
       OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
@@ -38,6 +46,10 @@ jobs:
       SOURCE_SCHEMA: public
       DESTINATION_SCHEMA: mottainai
       MIGRATION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+      MIGRATION_FORCE_FULL: ${{ github.event.schedule == '1 1 * * *' || (github.event_name == 'workflow_dispatch' && inputs.force_full) || 'false' }}
+      EMPLOYEE_PII_AES_KEY_B64: ${{ secrets.EMPLOYEE_PII_AES_KEY_B64 }}
+      EMPLOYEE_PII_LOOKUP_KEY_B64: ${{ secrets.EMPLOYEE_PII_LOOKUP_KEY_B64 }}
+      EMPLOYEE_PII_KEY_VERSION: ${{ vars.EMPLOYEE_PII_KEY_VERSION || '1' }}
 
     steps:
       - name: Check out repository
@@ -48,6 +60,16 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+
+      - name: Check required database and encryption secrets
+        shell: bash
+        run: |
+          for name in LEGACY_DB_HOST LEGACY_DB_PORT LEGACY_DB_NAME LEGACY_DB_USER LEGACY_DB_PASSWORD LEGACY_PII_KEY_B64 OPERATIONAL_DB_HOST OPERATIONAL_DB_PORT OPERATIONAL_DB_NAME OPERATIONAL_DB_USER OPERATIONAL_DB_PASSWORD EMPLOYEE_PII_AES_KEY_B64 EMPLOYEE_PII_LOOKUP_KEY_B64; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing secret::$name is not configured"
+              exit 1
+            fi
+          done
 
       - name: Install runtime dependencies
         run: pip install --requirement requirements.txt

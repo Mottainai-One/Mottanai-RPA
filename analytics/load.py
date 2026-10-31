@@ -60,12 +60,35 @@ DATASETS = (
             "SELECT p.sale_payment_id, p.sale_id, p.sale_date::date, s.store_id, p.payment_method::text, p.amount, p.installments FROM {src}.sale_payment p JOIN {src}.sales_transaction s ON s.sale_id=p.sale_id AND s.sale_date=p.sale_date"),
     Dataset("fact_inventory_movement", ("movement_id", "movement_date", "movement_timestamp", "company_id", "store_id", "inventory_id", "product_id", "batch_id", "employee_id", "movement_type", "quantity", "unit_cost"), ("movement_id", "movement_date"),
             "SELECT m.movement_id, m.movement_date::date, m.movement_date, st.company_id, i.store_id, i.inventory_id, b.product_id, i.batch_id, m.employee_id, m.movement_type::text, m.moved_quantity, b.unit_cost FROM {src}.inventory_movement m JOIN {src}.inventory i ON i.inventory_id=m.inventory_id JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id"),
+    Dataset("fact_inventory_count_line", ("inventory_count_item_id", "inventory_count_id", "count_date", "store_id", "product_id", "inventory_id", "batch_id", "status", "system_quantity", "counted_quantity", "unit_cost", "finished_at"), ("inventory_count_item_id",),
+            "SELECT ci.inventory_count_item_id, c.inventory_count_id, (c.started_at AT TIME ZONE 'America/Sao_Paulo')::date, c.store_id, b.product_id, i.inventory_id, i.batch_id, c.status::text, ci.system_quantity, ci.counted_quantity, b.unit_cost, c.finished_at FROM {src}.inventory_count_item ci JOIN {src}.inventory_count c ON c.inventory_count_id=ci.inventory_count_id JOIN {src}.inventory i ON i.inventory_id=ci.inventory_id JOIN {src}.batch b ON b.batch_id=i.batch_id WHERE ci.deleted_at IS NULL"),
     Dataset("fact_inventory_snapshot", ("snapshot_date", "company_id", "store_id", "product_id", "batch_id", "inventory_type", "quantity", "reserved_quantity", "average_cost", "expiration_date", "inventory_id", "minimum_quantity"), ("snapshot_date", "store_id", "product_id", "batch_id", "inventory_type"),
             "SELECT %s::date, st.company_id, i.store_id, b.product_id, i.batch_id, i.inventory_type::text, i.current_quantity, 0::numeric, b.unit_cost, b.expiration_date, i.inventory_id, i.minimum_quantity FROM {src}.inventory i JOIN {src}.batch b ON b.batch_id=i.batch_id JOIN {src}.retail_store st ON st.store_id=i.store_id WHERE i.deleted_at IS NULL", True),
     Dataset("fact_alert_snapshot", ("snapshot_date", "alert_id", "store_id", "status"), ("snapshot_date", "alert_id"),
             "SELECT %s::date, a.alert_id, a.store_id, a.status::text FROM {src}.alert a", True),
+    Dataset("fact_alert_lifecycle", ("alert_id", "store_id", "alert_type", "priority", "status", "generated_at", "resolved_at", "source_updated_at"), ("alert_id",),
+            "SELECT alert_id, store_id, alert_type::text, priority::text, status::text, generated_at, resolved_at, updated_at FROM {src}.alert"),
+    Dataset("fact_action_lifecycle", ("suggested_action_id", "alert_id", "store_id", "action_type", "status", "generated_at", "source_recommendation_uuid", "source_updated_at"), ("suggested_action_id",),
+            "SELECT a.suggested_action_id, a.alert_id, l.store_id, a.action_type::text, a.status::text, a.generated_at, a.source_recommendation_uuid, a.updated_at FROM {src}.suggested_action a JOIN {src}.alert l ON l.alert_id=a.alert_id"),
+    Dataset("fact_transfer_line", ("transfer_item_id", "transfer_id", "request_date", "requested_at", "completed_at", "source_store_id", "destination_store_id", "product_id", "batch_id", "suggested_action_id", "status", "transferred_quantity", "unit_cost"), ("transfer_item_id",),
+            "SELECT ti.transfer_item_id, t.transfer_id, t.request_date::date, t.request_date, t.completion_date, t.source_store_id, t.destination_store_id, b.product_id, ti.batch_id, t.suggested_action_id, t.status::text, ti.transferred_quantity, b.unit_cost FROM {src}.transfer_item ti JOIN {src}.transfer t ON t.transfer_id=ti.transfer_id JOIN {src}.batch b ON b.batch_id=ti.batch_id"),
+    Dataset("fact_replenishment_plan_line", ("pre_list_item_id", "pre_list_id", "store_id", "product_id", "generated_at", "status", "suggested_quantity"), ("pre_list_item_id",),
+            "SELECT pi.pre_list_item_id, p.pre_list_id, p.store_id, pi.product_id, p.generated_at, p.status::text, pi.suggested_quantity FROM {src}.replenishment_pre_list_item pi JOIN {src}.replenishment_pre_list p ON p.pre_list_id=pi.pre_list_id"),
+    Dataset("fact_replenishment_execution_line", ("execution_item_id", "execution_id", "pre_list_id", "store_id", "product_id", "batch_id", "started_at", "completed_at", "replenished_quantity"), ("execution_item_id",),
+            "SELECT ei.execution_item_id, e.execution_id, e.pre_list_id, p.store_id, b.product_id, ei.batch_id, e.start_date, e.end_date, ei.replenished_quantity FROM {src}.replenishment_execution_item ei JOIN {src}.replenishment_execution e ON e.execution_id=ei.execution_id JOIN {src}.replenishment_pre_list p ON p.pre_list_id=e.pre_list_id JOIN {src}.batch b ON b.batch_id=ei.batch_id"),
+    Dataset("fact_donation_line", ("donation_item_id", "donation_id", "donation_date", "store_id", "product_id", "batch_id", "suggested_action_id", "status", "donated_quantity", "unit_cost"), ("donation_item_id",),
+            "SELECT di.donation_item_id, d.donation_id, d.donation_date::date, d.store_id, b.product_id, di.batch_id, d.suggested_action_id, d.status::text, di.donated_quantity, b.unit_cost FROM {src}.donation_item di JOIN {src}.donation d ON d.donation_id=di.donation_id JOIN {src}.batch b ON b.batch_id=di.batch_id"),
+    Dataset("fact_disposal_line", ("disposal_item_id", "disposal_id", "disposal_date", "store_id", "product_id", "batch_id", "suggested_action_id", "disposed_quantity", "unit_cost"), ("disposal_item_id",),
+            "SELECT di.disposal_item_id, d.disposal_id, d.disposal_date::date, d.store_id, b.product_id, di.batch_id, d.suggested_action_id, di.disposed_quantity, b.unit_cost FROM {src}.disposal_item di JOIN {src}.disposal d ON d.disposal_id=di.disposal_id JOIN {src}.batch b ON b.batch_id=di.batch_id"),
     Dataset("fact_store_daily", ("snapshot_date", "company_id", "store_id", "employees_total", "employees_active", "users_total", "users_active"), ("snapshot_date", "store_id"),
             "SELECT %s::date, s.company_id, s.store_id, count(DISTINCT e.employee_id)::integer, count(DISTINCT e.employee_id) FILTER (WHERE e.active AND e.deleted_at IS NULL)::integer, count(DISTINCT u.user_id)::integer, count(DISTINCT u.user_id) FILTER (WHERE u.active AND u.deleted_at IS NULL)::integer FROM {src}.retail_store s LEFT JOIN {src}.employee e ON e.store_id=s.store_id LEFT JOIN {src}.app_user u ON u.employee_id=e.employee_id WHERE s.deleted_at IS NULL GROUP BY s.company_id,s.store_id", True),
+)
+
+OPERATIONAL_KPI_FACTS = (
+    "fact_inventory_count_line", "fact_transfer_line",
+    "fact_replenishment_plan_line", "fact_replenishment_execution_line",
+    "fact_donation_line", "fact_disposal_line",
+    "fact_alert_lifecycle", "fact_action_lifecycle",
 )
 
 
@@ -152,6 +175,19 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                     raise RuntimeError(
                         "Analytics publication view is not migrated; apply 14_publish_mart_view.sql first"
                     )
+                target_cursor.execute(
+                    """SELECT tablename FROM pg_tables
+                       WHERE schemaname = %s AND tablename = ANY(%s)""",
+                    (target_schema, list(OPERATIONAL_KPI_FACTS)),
+                )
+                installed = {row[0] for row in target_cursor.fetchall()}
+                missing = sorted(set(OPERATIONAL_KPI_FACTS) - installed)
+                if missing:
+                    raise RuntimeError(
+                        "Analytics KPI facts are not migrated; run "
+                        "database/analytics/15_operational_kpi_facts.sql "
+                        f"against MOTTAINAI_ANALITICO first (missing: {', '.join(missing)})"
+                    )
                 for dataset, rows in source_rows:
                     if dataset.snapshot:
                         target_cursor.execute(
@@ -189,9 +225,11 @@ def run(*, now: datetime | None = None) -> dict[str, int]:
                         )
                     counts[dataset.target] = written
                     LOG.info("loaded %s rows into %s", written, dataset.target)
-                publication_id = uuid4()
+                # psycopg2 does not adapt Python UUID objects unless its UUID
+                # adapter is registered. Send a canonical string explicitly.
+                publication_id = str(uuid4())
                 target_cursor.execute(
-                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, batch_id, cutoff_at, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
+                    sql.SQL("INSERT INTO {}.job_log (job_name, status, started_at, finished_at, rows_read, rows_written, batch_id, cutoff_at, metadata) VALUES (%s, %s::{}.job_status, %s, now(), %s, %s, %s::uuid, %s, %s::jsonb)").format(identifier(target_schema), identifier(target_schema)),
                     (
                         "operational_to_analytics_daily", "SUCCEEDED", run_at,
                         sum(counts.values()), sum(counts.values()), publication_id,
