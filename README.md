@@ -88,7 +88,7 @@ python run_analytics.py
 
 `run_analytics.py` é a carga analítica ativa e **grava e faz commit** no destino; ela não oferece dry-run. O caminho alternativo `run_analytics_daily.py` usa `ANALYTICS_DRY_RUN`, mas não substitui automaticamente o fluxo agendado. Evite executar agendas de GitHub Actions e Airflow sobre os mesmos bancos sem coordenar concorrência.
 
-## Operação e validação
+## Operação
 
 Os workflows estão em [.github/workflows](.github/workflows). A execução manual da sincronização oferece opções de simulação e reconciliação completa; a agendada é configurada para gravar. Após uma carga real, confira contagens, logs e o `batch_id` no analítico. As verificações em `tests/` não substituem uma validação com bancos reais e dados autorizados.
 
