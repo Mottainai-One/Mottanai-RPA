@@ -1,9 +1,12 @@
 # Carga operacional → analítico às 02:00
 
 O workflow `operational-to-analytics.yml` executa `run_analytics.py` diariamente
-às **02:00 em America/Sao_Paulo**. Ele é independente da sincronização
-legado → operacional. O GitHub agenda workflows somente a partir da branch
-padrão; esta rotina começa após o merge da PR e a configuração dos segredos.
+às **02:00 em America/Sao_Paulo** (`05:00 UTC`). A expressão usa UTC explícito
+porque as execuções observadas da configuração anterior com `timezone` iniciaram
+perto de 08:00 em São Paulo, depois do job Databricks das 02:30. Ele é
+independente da sincronização legado → operacional. O GitHub agenda workflows
+somente a partir da branch padrão; esta rotina começa após o merge da PR e a
+configuração dos segredos.
 
 ## Preparar o banco analítico
 
