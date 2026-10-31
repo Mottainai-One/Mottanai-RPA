@@ -2,8 +2,9 @@ name: Operational to analytics daily load
 
 on:
   schedule:
-    - cron: "0 2 * * *"
-      timezone: America/Sao_Paulo
+    # GitHub Actions cron defaults to UTC: 05:00 UTC is 02:00 in Sao Paulo (UTC-03).
+    # Keep the Databricks job at 02:30 Sao Paulo so it consumes this publication.
+    - cron: "0 5 * * *"
   workflow_dispatch:
 
 permissions:
