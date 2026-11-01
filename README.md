@@ -7,7 +7,7 @@ Automação de dados do ecossistema Mottainai. O repositório sincroniza dados d
 | Fluxo | Origem | Destino | Entrada | Agenda configurada |
 |---|---|---|---|---|
 | Legado → operacional | PostgreSQL legado | Schema `mottainai` no operacional | `python run_migration.py` | A cada 5 minutos; reconciliação completa diária às 01:01 em São Paulo; também aceita execução manual. |
-| Operacional → analítico | Banco operacional | Schema `mottainai_analytics` | `python run_analytics.py` | Diariamente às 02:00 em `America/Sao_Paulo`; após sucesso, aciona Databricks via OIDC quando configurado. |
+| Operacional → analítico | Banco operacional | Schema `mottainai_analytics` | `python run_analytics.py` | Diariamente às 02:00 em `America/Sao_Paulo`; após sucesso, aciona Databricks via OAuth M2M quando configurado. |
 
 As agendas estão nos workflows do GitHub Actions. Sua execução depende de os workflows estarem habilitados, dos segredos, das permissões e da disponibilidade dos bancos.
 
@@ -18,7 +18,7 @@ PostgreSQL legado → sincronização RPA → PostgreSQL operacional
                                               │
                                               └→ carga diária → PostgreSQL analítico
                                                                        │
-                                                                       └→ OIDC → Databricks Bronze → Silver → Gold → dashboard
+                                                                       └→ OAuth M2M → Databricks Bronze → Silver → Gold → dashboard
 ```
 
 A sincronização legado → operacional usa checkpoints para identificar alterações e permite reconciliação completa. A carga operacional → analítico reconcilia dimensões e fatos em uma transação, gera um `batch_id` e registra uma publicação `SUCCEEDED` com o contrato `analytics_mart_v1`. Se a carga falhar, a transação é revertida.
@@ -37,7 +37,7 @@ Mantenha chaves e credenciais no gerenciador de segredos do ambiente. Consulte o
 
 A carga exige que `vw_published_batch` esteja marcada com `publication_contract=analytics_mart_v1`. O repositório contém a [migração da view](analytics/migrations/14_publish_mart_view.sql); a execução manual do workflow chama `python -m analytics.migrate_publication` antes da carga. Essa migração altera o banco analítico e exige permissões apropriadas.
 
-Antes de usar a carga dos indicadores operacionais, aplique `database/analytics/15_operational_kpi_facts.sql` do repositório do banco no `MOTTAINAI_ANALITICO`. A carga interrompe se os fatos obrigatórios estiverem ausentes. Com a federação GitHub OIDC configurada, o workflow chama o job Databricks depois da confirmação do lote e espera a conclusão do medalhão e do refresh do dashboard. Consulte [o runbook do acionamento Databricks](docs/GITHUB_DAILY_LOAD.md#acionar-o-databricks-depois-da-publicação). Até habilitar o OIDC, o job Databricks mantém o agendamento das 02:30 como fallback.
+Antes de usar a carga dos indicadores operacionais, aplique `database/analytics/15_operational_kpi_facts.sql` do repositório do banco no `MOTTAINAI_ANALITICO`. A carga interrompe se os fatos obrigatórios estiverem ausentes. Com OAuth M2M configurado, o workflow chama o job Databricks depois da confirmação do lote e espera a conclusão do medalhão e do refresh do dashboard. Consulte [o runbook do acionamento Databricks](docs/GITHUB_DAILY_LOAD.md#acionar-o-databricks-depois-da-publicação). Até habilitar o M2M, o job Databricks mantém o agendamento das 02:30 como fallback.
 
 ## Tecnologias e requisitos
 

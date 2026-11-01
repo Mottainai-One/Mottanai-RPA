@@ -54,30 +54,32 @@ operacional e uma conta com escrita no analítico. O workflow usa SSL.
 Depois que `run_analytics.py` confirma a transação no analítico, o
 workflow pode iniciar o job `mottainai-analytics-to-medallion` e aguardar o
 resultado de Bronze → Silver → Gold → refresh do dashboard. A autenticação é
-GitHub OIDC com um service principal do Databricks; nenhum token Databricks é
-armazenado no GitHub. O acionamento só ocorre na branch `main`.
+OAuth M2M com um service principal dedicado do workspace. O segredo OAuth fica
+em GitHub Environment Secrets e o CLI solicita tokens de acesso curtos. O
+acionamento só ocorre na branch `main`.
 
 Configuração única necessária antes de habilitar o acionamento:
 
-1. Crie um service principal no Databricks Account Console e adicione-o ao
-   workspace `dbc-38ac8920-cbf4.cloud.databricks.com`.
+1. No Databricks, abra **Settings → Identity and access → Service principals
+   → Manage** e crie ou adicione um principal dedicado à automação. Se essa
+   opção não estiver disponível no Free Edition, mantenha o agendamento fixo
+   do job às 02:30; o gatilho pós-publicação depende de uma identidade M2M.
 2. No job `mottainai-analytics-to-medallion` (ID `731348243647869`), conceda a
    esse principal somente a permissão `CAN MANAGE RUN`.
-3. No principal, crie uma política de federação de workload com:
-   - Issuer: `https://token.actions.githubusercontent.com`
-   - Audience: `6652101d-d790-4989-8073-d3d8f687c003`
-   - Subject: `repo:Mottainai-One@310825313/Mottanai-RPA@1353721751:environment:databricks-production`
-4. Em **Settings → Environments**, crie o ambiente `databricks-production`.
-   Adicione estas **variables** ao ambiente (não são secrets):
+3. Gere um OAuth secret para esse principal, com escopo `jobs` se a interface
+   permitir selecionar escopos.
+4. Em **GitHub → Settings → Environments → databricks-production**, configure
+   estas variáveis e o secret:
 
    | Variable | Value |
    | --- | --- |
    | `DATABRICKS_HOST` | `https://dbc-38ac8920-cbf4.cloud.databricks.com` |
    | `DATABRICKS_CLIENT_ID` | Application ID do service principal |
    | `DATABRICKS_JOB_ID` | `731348243647869` |
+   | Secret `DATABRICKS_CLIENT_SECRET` | OAuth secret gerado para o principal |
 
 Sem essas variables, o workflow emite um aviso e o agendamento Databricks das
-02:30 permanece como fallback. Depois de validar o primeiro acionamento OIDC
+02:30 permanece como fallback. Depois de validar o primeiro acionamento M2M
 end-to-end, pause o agendamento fixo do job Databricks para evitar uma segunda
 execução sem lote novo. A carga do RPA segue agendada para 02:00 em São Paulo;
 o job Databricks acionado pelo workflow executa assim que a publicação
@@ -105,9 +107,9 @@ SELECT count(*) FROM mottainai_analytics.fact_inventory_snapshot;
 ```
 
 A execução publica o `batch_id` em `job_log` quando as contagens de cada
-destino batem com a extração. Uma falha reverte a transação inteira. Com o OIDC
+destino batem com a extração. Uma falha reverte a transação inteira. Com OAuth M2M
 configurado, o mesmo workflow dispara o job Bronze/Silver/Gold e aguarda o
-refresh do dashboard. Sem OIDC, o job Databricks das 02:30 é o fallback
+refresh do dashboard. Sem M2M, o job Databricks das 02:30 é o fallback
 automático.
 
 O cron está configurado para 02:00 em São Paulo, mas o GitHub Actions pode

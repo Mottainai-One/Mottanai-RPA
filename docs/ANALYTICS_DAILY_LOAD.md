@@ -4,6 +4,8 @@
 
 O RPA legado → operacional pode rodar independentemente. Este segundo fluxo publica no analítico uma fotografia consistente do operacional uma vez por dia, com execução planejada para **02:00 no fuso America/Sao_Paulo**. Ela inclui as mudanças confirmadas até o início efetivo da leitura, inclusive as realizadas entre 00:00 e 02:00. O agendamento ativo após merge e configuração dos segredos é `.github/workflows/operational-to-analytics.yml`; consulte [o guia de implantação](GITHUB_DAILY_LOAD.md). A DAG em `dags/operational_to_analytics.py` é uma alternativa para uma futura instalação de Airflow. Também é possível executar manualmente com `python run_analytics.py`.
 
+O workflow GitHub Actions ativo usa `run_analytics.py` e registra uma publicação em `job_log`/`vw_published_batch`. Ele **não grava em `etl_daily_batch`**. O script alternativo `run_analytics_daily.py` stages linhas em `etl_daily_batch`, mas não materializa as tabelas fato e dimensão usadas pelo dashboard; por isso não é o carregador agendado nem um substituto pronto.
+
 Entre duas publicações concluídas, as consultas do dashboard usam a última fotografia publicada. Se a execução falhar, a transação do analítico é revertida e a versão anterior continua disponível. O horário real do corte fica em `mottainai_analytics.vw_published_batch.source_cutoff_at`; se o job começar atrasado, o corte também será posterior às 02:00.
 
 ## Preparação

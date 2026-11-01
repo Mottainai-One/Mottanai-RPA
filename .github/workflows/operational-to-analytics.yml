@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: operational-to-analytics-daily
@@ -20,7 +19,6 @@ jobs:
     name: Publish analytical data mart
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: databricks-production
     env:
       OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
       OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
@@ -59,35 +57,42 @@ jobs:
         run: python -u -m analytics.migrate_publication
       - name: Reconcile and publish data mart
         run: python -u run_analytics.py
-      - name: Install Databricks CLI
-        if: >-
-          ${{
-            github.ref == 'refs/heads/main' &&
-            vars.DATABRICKS_HOST != '' &&
-            vars.DATABRICKS_CLIENT_ID != '' &&
-            vars.DATABRICKS_JOB_ID != ''
-          }}
-        uses: databricks/setup-cli@main
-      - name: Trigger and await Databricks medallion refresh
-        if: >-
-          ${{
-            github.ref == 'refs/heads/main' &&
-            vars.DATABRICKS_HOST != '' &&
-            vars.DATABRICKS_CLIENT_ID != '' &&
-            vars.DATABRICKS_JOB_ID != ''
-          }}
+
+  refresh-dashboard:
+    name: Refresh Databricks medallion and dashboard
+    needs: load
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: databricks-production
+    steps:
+      - name: Check Databricks OAuth configuration
+        id: auth
+        shell: bash
         env:
-          DATABRICKS_AUTH_TYPE: github-oidc
           DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
           DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
+          DATABRICKS_JOB_ID: ${{ vars.DATABRICKS_JOB_ID }}
+        run: |
+          if [[ -n "$DATABRICKS_HOST" && -n "$DATABRICKS_CLIENT_ID" && -n "$DATABRICKS_CLIENT_SECRET" && -n "$DATABRICKS_JOB_ID" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Databricks CLI
+        if: steps.auth.outputs.enabled == 'true'
+        uses: databricks/setup-cli@main
+      - name: Trigger and await Databricks medallion refresh
+        if: steps.auth.outputs.enabled == 'true'
+        env:
+          DATABRICKS_AUTH_TYPE: oauth-m2m
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}
           DATABRICKS_JOB_ID: ${{ vars.DATABRICKS_JOB_ID }}
         run: databricks jobs run-now "$DATABRICKS_JOB_ID" --timeout 30m --output json
       - name: Explain scheduled fallback
-        if: >-
-          ${{
-            github.ref == 'refs/heads/main' &&
-            (vars.DATABRICKS_HOST == '' ||
-             vars.DATABRICKS_CLIENT_ID == '' ||
-             vars.DATABRICKS_JOB_ID == '')
-          }}
-        run: echo "::warning::Databricks OIDC variables are not configured; the independent 02:30 Sao Paulo schedule remains the fallback."
+        if: steps.auth.outputs.enabled != 'true'
+        run: echo "::warning::Databricks OAuth M2M credentials are not configured; the independent 02:30 Sao Paulo schedule remains the fallback."
