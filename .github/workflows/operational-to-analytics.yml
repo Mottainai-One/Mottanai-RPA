@@ -2,13 +2,14 @@ name: Operational to analytics daily load
 
 on:
   schedule:
-    # GitHub Actions cron defaults to UTC: 05:00 UTC is 02:00 in Sao Paulo (UTC-03).
-    # Keep the Databricks job at 02:30 Sao Paulo so it consumes this publication.
+    # GitHub Actions cron uses UTC: 05:00 UTC is 02:00 in Sao Paulo (UTC-03).
+    # The scheduled workflow reconciles and commits the operational data mart.
     - cron: "0 5 * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: operational-to-analytics-daily
@@ -19,6 +20,7 @@ jobs:
     name: Publish analytical data mart
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: databricks-production
     env:
       OPERATIONAL_DB_HOST: ${{ secrets.OPERATIONAL_DB_HOST }}
       OPERATIONAL_DB_PORT: ${{ secrets.OPERATIONAL_DB_PORT }}
@@ -57,3 +59,35 @@ jobs:
         run: python -u -m analytics.migrate_publication
       - name: Reconcile and publish data mart
         run: python -u run_analytics.py
+      - name: Install Databricks CLI
+        if: >-
+          ${{
+            github.ref == 'refs/heads/main' &&
+            vars.DATABRICKS_HOST != '' &&
+            vars.DATABRICKS_CLIENT_ID != '' &&
+            vars.DATABRICKS_JOB_ID != ''
+          }}
+        uses: databricks/setup-cli@main
+      - name: Trigger and await Databricks medallion refresh
+        if: >-
+          ${{
+            github.ref == 'refs/heads/main' &&
+            vars.DATABRICKS_HOST != '' &&
+            vars.DATABRICKS_CLIENT_ID != '' &&
+            vars.DATABRICKS_JOB_ID != ''
+          }}
+        env:
+          DATABRICKS_AUTH_TYPE: github-oidc
+          DATABRICKS_HOST: ${{ vars.DATABRICKS_HOST }}
+          DATABRICKS_CLIENT_ID: ${{ vars.DATABRICKS_CLIENT_ID }}
+          DATABRICKS_JOB_ID: ${{ vars.DATABRICKS_JOB_ID }}
+        run: databricks jobs run-now "$DATABRICKS_JOB_ID" --timeout 30m --output json
+      - name: Explain scheduled fallback
+        if: >-
+          ${{
+            github.ref == 'refs/heads/main' &&
+            (vars.DATABRICKS_HOST == '' ||
+             vars.DATABRICKS_CLIENT_ID == '' ||
+             vars.DATABRICKS_JOB_ID == '')
+          }}
+        run: echo "::warning::Databricks OIDC variables are not configured; the independent 02:30 Sao Paulo schedule remains the fallback."
